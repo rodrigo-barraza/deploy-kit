@@ -3624,3 +3624,124 @@
 [2m19:54:28[0m [38;5;33m[1m[prism-service       ][0m   [2mmaster@71d5b56 → synology (2026-05-21T02:54:21Z)[0m
 [2m19:54:28[0m [38;5;33m[1m[prism-service       ][0m [32m[1m══════════════════════════════════════════════════════[0m
 [2m19:54:28[0m [38;5;33m[1m[prism-service       ][0m 
+[2m19:55:36[0m [38;5;33m[1m[tools-service       ][0m   #19 naming to docker.io/library/tools-service:latest done
+[2m19:55:36[0m [38;5;33m[1m[tools-service       ][0m   #19 unpacking to docker.io/library/tools-service:latest
+[2m19:55:36[0m [38;5;33m[1m[tools-service       ][0m   #19 unpacking to docker.io/library/tools-service:latest 2.0s done
+[2m19:55:36[0m [38;5;33m[1m[tools-service       ][0m   #19 CANCELED
+[2m19:55:36[0m [38;5;33m[1m[tools-service       ][0m   ERROR: failed to build: failed to solve: Canceled: context canceled
+[2m19:55:36[0m [38;5;33m[1m[tools-service       ][0m [2m19:55:36[0m   [31m✖ Build timed out after 600s[0m
+[2m19:56:29[0m [38;5;220m[1m[lupos-bot           ][0m   #22 naming to docker.io/library/lupos-bot:latest 0.0s done
+[2m19:56:29[0m [38;5;220m[1m[lupos-bot           ][0m   #22 unpacking to docker.io/library/lupos-bot:latest
+[2m19:56:29[0m [38;5;220m[1m[lupos-bot           ][0m   #22 unpacking to docker.io/library/lupos-bot:latest 10.5s done
+[2m19:56:29[0m [38;5;220m[1m[lupos-bot           ][0m   #22 CANCELED
+[2m19:56:29[0m [38;5;220m[1m[lupos-bot           ][0m   ERROR: failed to build: failed to solve: Canceled: context canceled
+[2m19:56:29[0m [38;5;220m[1m[lupos-bot           ][0m [2m19:56:29[0m   [31m✖ Build timed out after 600s[0m
+[2m19:56:30[0m   [32m✔ vault-service healthy (http://192.168.86.2:5599/health)[0m
+[2m19:56:30[0m   [32m✔ All Tier 0 — Foundation services healthy ✓[0m
+
+[2m19:56:30[0m [35m[1m━━━ Tier 1 — Services & Clients ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[2m19:56:30[0m [36m[1m▸ Waiting for Tier 1 — Services & Clients transfers to finish[0m
+./deploy-all.sh: line 614: wait: pid 1203088 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203092 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203097 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203100 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203103 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203104 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203108 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203111 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203115 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203118 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203121 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203126 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203127 is not a child of this shell
+[2m19:56:30[0m   [31m✖ messages-service transfer failed → /home/rodrigo/development/deploy-kit/.deploy-logs/messages-service.transfer.log[0m
+./deploy-all.sh: line 614: wait: pid 1203130 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203133 is not a child of this shell
+[2m19:56:30[0m   [31m✖ ledger-service transfer failed → /home/rodrigo/development/deploy-kit/.deploy-logs/ledger-service.transfer.log[0m
+./deploy-all.sh: line 614: wait: pid 1203137 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203141 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203146 is not a child of this shell
+[2m19:56:30[0m   [31m✖ sessions-service transfer failed → /home/rodrigo/development/deploy-kit/.deploy-logs/sessions-service.transfer.log[0m
+./deploy-all.sh: line 614: wait: pid 1203148 is not a child of this shell
+[2m19:56:30[0m   [31m✖ dygest-service transfer failed → /home/rodrigo/development/deploy-kit/.deploy-logs/dygest-service.transfer.log[0m
+./deploy-all.sh: line 614: wait: pid 1203151 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203153 is not a child of this shell
+[2m19:56:30[0m   [31m✖ gauge-service transfer failed → /home/rodrigo/development/deploy-kit/.deploy-logs/gauge-service.transfer.log[0m
+./deploy-all.sh: line 614: wait: pid 1203157 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203161 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203164 is not a child of this shell
+[2m19:56:30[0m   [31m✖ reels-client transfer failed → /home/rodrigo/development/deploy-kit/.deploy-logs/reels-client.transfer.log[0m
+./deploy-all.sh: line 614: wait: pid 1203167 is not a child of this shell
+[2m19:56:30[0m   [31m✖ clankerbox-service transfer failed → /home/rodrigo/development/deploy-kit/.deploy-logs/clankerbox-service.transfer.log[0m
+./deploy-all.sh: line 614: wait: pid 1203170 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203173 is not a child of this shell
+[2m19:56:30[0m   [31m✖ iron-service transfer failed → /home/rodrigo/development/deploy-kit/.deploy-logs/iron-service.transfer.log[0m
+./deploy-all.sh: line 614: wait: pid 1203178 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203181 is not a child of this shell
+[2m19:56:30[0m   [31m✖ games-service transfer failed → /home/rodrigo/development/deploy-kit/.deploy-logs/games-service.transfer.log[0m
+./deploy-all.sh: line 614: wait: pid 1203183 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203185 is not a child of this shell
+./deploy-all.sh: line 614: wait: pid 1203188 is not a child of this shell
+[2m19:56:30[0m   [33m⚠ Some transfers in Tier 1 — Services & Clients failed — check logs in /home/rodrigo/development/deploy-kit/.deploy-logs/[0m
+[2m19:56:30[0m   [31m✖ tools-service: build failed — skipping[0m
+[2m19:56:30[0m   [2mNo services to restart in Tier 1 — Services & Clients[0m
+
+[2m19:56:30[0m [35m[1m━━━ Tier 2 — Bots ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[2m19:56:30[0m [36m[1m▸ Waiting for Tier 2 — Bots transfers to finish[0m
+./deploy-all.sh: line 614: wait: pid 1203193 is not a child of this shell
+[2m19:56:30[0m   [31m✖ lupos-bot: build failed — skipping[0m
+[2m19:56:30[0m   [2mNo services to restart in Tier 2 — Bots[0m
+
+[33m[1m┌──────────────────────────────────────────────────────────┐[0m
+[33m[1m│  PHASE 3 — LOCAL IMAGE CLEANUP                          │[0m
+[33m[1m│  Remove stale tags, dangling layers, and build cache     │[0m
+[33m[1m└──────────────────────────────────────────────────────────┘[0m
+[2m19:56:37[0m   [32m✔ No stale local images to clean[0m
+
+[2m19:56:37[0m [36m[1m▸ Pruning all BuildKit build cache[0m
+[2m19:57:18[0m   [32m✔ Build cache pruned — 0B reclaimed[0m
+
+[35m[1m══════════════════════════════════════════════════════════════[0m
+[35m[1m  ☀️  Deploy All — Summary[0m
+[35m[1m══════════════════════════════════════════════════════════════[0m
+  [31m✖ lupos-bot[0m  →  /home/rodrigo/development/deploy-kit/.deploy-logs/lupos-bot.build.log [2m(build failed)[0m
+  [31m✖ tools-service[0m  →  /home/rodrigo/development/deploy-kit/.deploy-logs/tools-service.build.log [2m(build failed)[0m
+  [2m⊘ portal-service (skipped)[0m
+  [2m⊘ lights-service (skipped)[0m
+  [2m⊘ clock-crew-service (skipped)[0m
+  [2m⊘ prism-service (skipped)[0m
+  [2m⊘ prism-client (skipped)[0m
+  [2m⊘ portal-client (skipped)[0m
+  [2m⊘ clock-crew-client (skipped)[0m
+  [2m⊘ lights-client (skipped)[0m
+  [2m⊘ rod-dev-client (skipped)[0m
+  [2m⊘ meepothegeomancer-client (skipped)[0m
+  [2m⊘ classic-whitemane-client (skipped)[0m
+  [2m⊘ messages-service (skipped)[0m
+  [2m⊘ messages-client (skipped)[0m
+  [2m⊘ ledger-service (skipped)[0m
+  [2m⊘ ledger-client (skipped)[0m
+  [2m⊘ workspace-service (skipped)[0m
+  [2m⊘ sessions-service (skipped)[0m
+  [2m⊘ dygest-service (skipped)[0m
+  [2m⊘ dygest-client (skipped)[0m
+  [2m⊘ gauge-service (skipped)[0m
+  [2m⊘ gauge-client (skipped)[0m
+  [2m⊘ reels-service (skipped)[0m
+  [2m⊘ reels-client (skipped)[0m
+  [2m⊘ clankerbox-service (skipped)[0m
+  [2m⊘ clankerbox-client (skipped)[0m
+  [2m⊘ iron-service (skipped)[0m
+  [2m⊘ iron-client (skipped)[0m
+  [2m⊘ games-service (skipped)[0m
+  [2m⊘ games-client (skipped)[0m
+  [2m⊘ qbittorrent-service (skipped)[0m
+  [2m⊘ lupos-client (skipped)[0m
+  [2m⊘ vault-service (skipped)[0m
+
+  [32m0 passed[0m  [31m2 failed[0m  [2m32 skipped[0m
+  [2mTotal: 743s[0m
+
+[35m[1m══════════════════════════════════════════════════════════════[0m

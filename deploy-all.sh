@@ -108,6 +108,7 @@ ALL_SERVICES=()
 declare -A TIER_SERVICES  # tier -> space-separated service IDs
 declare -A SVC_HEALTH_URL # service-id -> health check URL
 declare -A SVC_DEPLOY_TARGET  # service-id -> device ID
+declare -A SVC_LIB_DEPS   # service-id -> space-separated library dependency IDs
 
 # Device metadata (populated from projects.json devices array)
 declare -A DEVICE_METHOD      # device-id -> ssh | docker-api
@@ -170,6 +171,19 @@ eval "$(node -e "
     const ids = (tiers[t] || []).join(' ');
     console.log('TIER_SERVICES[' + t + ']=\"' + ids + '\"');
     console.log('TIER_' + t + '=(' + ids + ')');
+  }
+
+  // Emit library dependencies for each project
+  const libs = s.projects.filter(p => p.projectType === 'Library');
+  const libIds = new Set(libs.map(l => l.id));
+  for (const proj of s.projects) {
+    if (proj.projectType === 'Library') continue;
+    const deps = (proj.dependsOn || [])
+      .map(d => d.id)
+      .filter(id => libIds.has(id));
+    if (deps.length > 0) {
+      console.log('SVC_LIB_DEPS[' + proj.id + ']=\"' + deps.join(' ') + '\"');
+    }
   }
 ")"
 
@@ -319,13 +333,48 @@ has_changes() {
     return 0
   fi
 
-  # Check if there are any changes since that SHA
-  if (cd "$svc_dir" && git diff --quiet "$last_sha" HEAD -- . 2>/dev/null); then
-    # No changes
-    return 1
+  # Check if there are any changes since that SHA in the service itself
+  if ! (cd "$svc_dir" && git diff --quiet "$last_sha" HEAD -- . 2>/dev/null); then
+    # Has changes
+    return 0
   fi
 
-  return 0
+  # Check if any library dependency has changed since the last deploy of this service
+  if [ -n "${SVC_LIB_DEPS[$svc]:-}" ]; then
+    local dep_file="${DEPLOY_STATE_DIR}/${svc}.deps.sha"
+    if [ ! -f "$dep_file" ]; then
+      # No dependency marker file — force build to create it
+      return 0
+    fi
+
+    # Read the saved dependency SHAs
+    declare -A saved_shas
+    while IFS=': ' read -r dep_id dep_sha || [ -n "$dep_id" ]; do
+      [ -z "$dep_id" ] && continue
+      saved_shas[$dep_id]="$dep_sha"
+    done < "$dep_file"
+
+    for dep_id in ${SVC_LIB_DEPS[$svc]}; do
+      local dep_dir="${ROOT_DIR}/${dep_id}"
+      local current_dep_sha
+      current_dep_sha=$(cd "$dep_dir" && git rev-parse HEAD 2>/dev/null || echo "")
+      local saved_dep_sha="${saved_shas[$dep_id]:-}"
+
+      if [ "$current_dep_sha" != "$saved_dep_sha" ]; then
+        # Library SHA has changed!
+        return 0
+      fi
+
+      # Also check if the library directory itself has dirty uncommitted changes
+      if ! (cd "$dep_dir" && git diff --quiet HEAD -- . 2>/dev/null) || \
+         [ -n "$(cd "$dep_dir" && git ls-files --others --exclude-standard . 2>/dev/null)" ]; then
+        # Library has local uncommitted changes!
+        return 0
+      fi
+    done
+  fi
+
+  return 1
 }
 
 # ── Build deploy flags ────────────────────────────────────────
@@ -393,11 +442,25 @@ run_phase() {
   # automatically (via lib.sh). Services using pre-built images
   # (e.g. qbittorrent-service) don't — so we persist the SHA to
   # a marker file for has_changes() to use on subsequent runs.
-  if { [ "$phase" = "deploy" ] || [ "$phase" = "restart" ]; } && [ "$(cat "$status_file" 2>/dev/null)" = "OK" ]; then
+  if { [ "$phase" = "build" ] || [ "$phase" = "deploy" ] || [ "$phase" = "restart" ]; } && [ "$(cat "$status_file" 2>/dev/null)" = "OK" ]; then
     local current_sha
     current_sha=$(cd "$svc_dir" && git rev-parse HEAD 2>/dev/null || echo "")
     if [ -n "$current_sha" ]; then
       echo "$current_sha" > "${DEPLOY_STATE_DIR}/${svc}.sha"
+    fi
+
+    # Persist the current git SHAs of all library dependencies
+    if [ -n "${SVC_LIB_DEPS[$svc]:-}" ]; then
+      local dep_file="${DEPLOY_STATE_DIR}/${svc}.deps.sha"
+      rm -f "$dep_file"
+      for dep_id in ${SVC_LIB_DEPS[$svc]}; do
+        local dep_dir="${ROOT_DIR}/${dep_id}"
+        local dep_sha
+        dep_sha=$(cd "$dep_dir" && git rev-parse HEAD 2>/dev/null || echo "")
+        if [ -n "$dep_sha" ]; then
+          echo "${dep_id}: ${dep_sha}" >> "$dep_file"
+        fi
+      done
     fi
   fi
 }

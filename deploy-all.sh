@@ -41,9 +41,41 @@
 
 set -euo pipefail
 
-# Clean up semaphore FIFO on exit
-cleanup() { exec 7>&- 2>/dev/null; rm -f "${LOG_DIR:-.deploy-logs}/.build-semaphore" 2>/dev/null; rm -rf "${LOG_DIR:-.deploy-logs}"/.health-* 2>/dev/null; rm -f "${LOG_DIR:-.deploy-logs}"/*.pid 2>/dev/null; }
+# Clean up semaphore FIFO and play completion earcons (auditory notifications) on exit
+MAIN_PID=$BASHPID
+cleanup() {
+  # Only execute in the main script process to avoid subshell duplicate notifications
+  if [ "${BASHPID:-}" = "${MAIN_PID:-}" ]; then
+    local exit_code=$?
+    
+    # Close semaphore file descriptors
+    exec 7>&- 2>/dev/null || true
+    exec 8>&- 2>/dev/null || true
+    
+    # Clean up FIFOs, health files, and PIDs
+    rm -f "${LOG_DIR:-.deploy-logs}/.build-semaphore" 2>/dev/null || true
+    rm -f "${LOG_DIR:-.deploy-logs}/.ssh-semaphore" 2>/dev/null || true
+    rm -rf "${LOG_DIR:-.deploy-logs}"/.health-* 2>/dev/null || true
+    rm -f "${LOG_DIR:-.deploy-logs}"/*.pid 2>/dev/null || true
+
+    # Play completion sound if not in a dry-run
+    if [ "${DRY_RUN:-false}" = "false" ]; then
+      if [ "$exit_code" -eq 0 ]; then
+        # Succeeded: play Tada chime
+        if command -v powershell.exe >/dev/null 2>&1; then
+          powershell.exe -Command "(New-Object Media.SoundPlayer 'C:\Windows\Media\tada.wav').PlaySync()" >/dev/null 2>&1 || true
+        fi
+      else
+        # Failed: play Chord warning
+        if command -v powershell.exe >/dev/null 2>&1; then
+          powershell.exe -Command "(New-Object Media.SoundPlayer 'C:\Windows\Media\chord.wav').PlaySync()" >/dev/null 2>&1 || true
+        fi
+      fi
+    fi
+  fi
+}
 trap cleanup EXIT
+
 
 # ── Config ────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

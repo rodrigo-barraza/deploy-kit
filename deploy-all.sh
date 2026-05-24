@@ -343,8 +343,16 @@ has_changes() {
   if [ -n "${SVC_LIB_DEPS[$svc]:-}" ]; then
     local dep_file="${DEPLOY_STATE_DIR}/${svc}.deps.sha"
     if [ ! -f "$dep_file" ]; then
-      # No dependency marker file — force build to create it
-      return 0
+      # Quietly initialize the dependency marker file to prevent false-positive initial bootstrap builds
+      rm -f "$dep_file"
+      for dep_id in ${SVC_LIB_DEPS[$svc]}; do
+        local dep_dir="${ROOT_DIR}/${dep_id}"
+        local dep_sha
+        dep_sha=$(cd "$dep_dir" && git rev-parse HEAD 2>/dev/null || echo "")
+        if [ -n "$dep_sha" ]; then
+          echo "${dep_id}: ${dep_sha}" >> "$dep_file"
+        fi
+      done
     fi
 
     # Read the saved dependency SHAs

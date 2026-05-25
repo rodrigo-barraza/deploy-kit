@@ -44,9 +44,11 @@ set -euo pipefail
 # Clean up semaphore FIFO and play completion earcons (auditory notifications) on exit
 MAIN_PID=$BASHPID
 cleanup() {
+  # Capture exit code IMMEDIATELY — before any conditional clobbers $?
+  local exit_code=$?
+
   # Only execute in the main script process to avoid subshell duplicate notifications
   if [ "${BASHPID:-}" = "${MAIN_PID:-}" ]; then
-    local exit_code=$?
     
     # Close semaphore file descriptors
     exec 7>&- 2>/dev/null || true

@@ -213,13 +213,13 @@ done
 # ── Colors & logging (shared) ─────────────────────────────────
 source "${SCRIPT_DIR}/colors.sh"
 
-# Redefine logging functions to clean-overwrite the inline progress bar
-ok()      { printf '\r\033[K%s   %s✔ %s%s\n' "$(ts)" "$GREEN" "$1" "$RESET"; }
-warn()    { printf '\r\033[K%s   %s⚠ %s%s\n' "$(ts)" "$YELLOW" "$1" "$RESET"; }
-fail()    { printf '\r\033[K%s   %s✖ %s%s\n' "$(ts)" "$RED" "$1" "$RESET"; }
-info()    { printf '\r\033[K%s   %s%s%s\n' "$(ts)" "$DIM" "$1" "$RESET"; }
-step()    { printf '\r\033[K\n%s %s%s▸ %s%s\n' "$(ts)" "$CYAN" "$BOLD" "$1" "$RESET"; }
-header()  { printf '\r\033[K\n%s %s%s%s%s\n' "$(ts)" "$MAGENTA" "$BOLD" "$1" "$RESET"; }
+# Redefine logging functions to clean-overwrite the inline progress bar and immediately redraw it on TTYs
+ok()      { printf '\r\033[K%s   %s✔ %s%s\n' "$(ts)" "$GREEN" "$1" "$RESET"; [ -t 1 ] && show_progress; }
+warn()    { printf '\r\033[K%s   %s⚠ %s%s\n' "$(ts)" "$YELLOW" "$1" "$RESET"; [ -t 1 ] && show_progress; }
+fail()    { printf '\r\033[K%s   %s✖ %s%s\n' "$(ts)" "$RED" "$1" "$RESET"; [ -t 1 ] && show_progress; }
+info()    { printf '\r\033[K%s   %s%s%s\n' "$(ts)" "$DIM" "$1" "$RESET"; [ -t 1 ] && show_progress; }
+step()    { printf '\r\033[K\n%s %s%s▸ %s%s\n' "$(ts)" "$CYAN" "$BOLD" "$1" "$RESET"; [ -t 1 ] && show_progress; }
+header()  { printf '\r\033[K\n%s %s%s%s%s\n' "$(ts)" "$MAGENTA" "$BOLD" "$1" "$RESET"; [ -t 1 ] && show_progress; }
 
 # ── Progress tracking ──────────────────────────────────────────
 show_progress() {
@@ -523,7 +523,10 @@ run_phase() {
   if [ "$prefix" = "true" ]; then
     bash "${svc_dir}/deploy.sh" ${phase_flag} $flags 2>&1 \
       | tee "$log_file" \
-      | while IFS= read -r line; do printf '%s %s%s[%s]%s %s\n' "$(ts)" "$color" "$BOLD" "$pad_svc" "$RESET" "$line"; done \
+      | while IFS= read -r line; do
+          printf '\r\033[K%s %s%s[%s]%s %s\n' "$(ts)" "$color" "$BOLD" "$pad_svc" "$RESET" "$line"
+          [ -t 1 ] && show_progress
+        done \
       && { echo "OK" > "$status_file"; show_progress; } \
       || { echo "FAIL" > "$status_file"; show_progress; }
   else

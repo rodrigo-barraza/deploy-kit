@@ -66,8 +66,18 @@ cleanup() {
           powershell.exe -Command "(New-Object Media.SoundPlayer 'C:\Windows\Media\tada.wav').PlaySync()" >/dev/null 2>&1 || true
         fi
       else
-        # Failed: play Chord warning
-        if command -v powershell.exe >/dev/null 2>&1; then
+        # Failed: play Uh-Oh sound if available, otherwise Chord warning
+        local sound_dir="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+        local uhoh_wav="${sound_dir}/uhoh.wav"
+        if [ -f "$uhoh_wav" ] && command -v powershell.exe >/dev/null 2>&1; then
+          local win_path
+          win_path=$(wslpath -w "$uhoh_wav" 2>/dev/null || echo "")
+          if [ -n "$win_path" ]; then
+            powershell.exe -Command "(New-Object Media.SoundPlayer '$win_path').PlaySync()" >/dev/null 2>&1 || true
+          else
+            powershell.exe -Command "(New-Object Media.SoundPlayer 'C:\Windows\Media\chord.wav').PlaySync()" >/dev/null 2>&1 || true
+          fi
+        elif command -v powershell.exe >/dev/null 2>&1; then
           powershell.exe -Command "(New-Object Media.SoundPlayer 'C:\Windows\Media\chord.wav').PlaySync()" >/dev/null 2>&1 || true
         fi
       fi

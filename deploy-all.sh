@@ -265,6 +265,10 @@ BUILD_ONLY=false
 COMPACT_WSL=false
 GROUP=""
 MAX_CONCURRENT_BUILDS=32  # Limit concurrent docker builds to prevent I/O saturation
+# Detect WSL2 and automatically reduce builds to prevent CPU/IO starvation
+if grep -qi microsoft /proc/version 2>/dev/null; then
+  MAX_CONCURRENT_BUILDS=4
+fi
 MAX_CONCURRENT_SSH=6      # Limit concurrent SSH operations to prevent MaxSessions drop
 
 for arg in "$@"; do

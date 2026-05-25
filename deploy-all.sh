@@ -1205,23 +1205,22 @@ if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN; then
   declare -A PULLED_CHANGES
   if ! $SKIP_PULL; then
     step "Pre-pulling libraries in parallel"
-    local pull_pids=()
+    pull_pids=()
     for lib_id in "${LIBRARY_IDS[@]}"; do
       lib_dir="${ROOT_DIR}/${lib_id}"
       [ -d "$lib_dir" ] || continue
-      local pull_log="${LOG_DIR}/${lib_id}.pull.log"
+      pull_log="${LOG_DIR}/${lib_id}.pull.log"
       (cd "$lib_dir" && git pull --ff-only 2>&1 > "$pull_log") &
       pull_pids+=("$!:$lib_id:$pull_log")
     done
 
     for entry in "${pull_pids[@]}"; do
-      local pid="${entry%%:*}"
-      local rest="${entry#*:}"
-      local lib_id="${rest%%:*}"
-      local pull_log="${rest#*:}"
+      pid="${entry%%:*}"
+      rest="${entry#*:}"
+      lib_id="${rest%%:*}"
+      pull_log="${rest#*:}"
       wait "$pid" 2>/dev/null || true
       if [ -f "$pull_log" ]; then
-        local output
         output=$(cat "$pull_log")
         PULL_OUTPUTS[$lib_id]="$output"
         if echo "$output" | grep -q -vE "Already up to date|Current branch.*is up to date"; then

@@ -60,12 +60,9 @@ cleanup() {
     rm -rf "${LOG_DIR:-.deploy-logs}"/.health-* 2>/dev/null || true
     rm -f "${LOG_DIR:-.deploy-logs}"/*.pid 2>/dev/null || true
 
-    # Reset terminal scroll region to full screen
+    # Reset terminal scroll region to full screen and clear progress bar
     if [ -t 1 ]; then
-      printf '\033[r'
-      local lines
-      lines=$(tput lines 2>/dev/null || echo 24)
-      printf '\033[%d;1H\n' "$lines"
+      printf '\033[r\r\033[K'
     fi
 
     # Play completion sound if not in a dry-run
@@ -216,6 +213,14 @@ done
 # ── Colors & logging (shared) ─────────────────────────────────
 source "${SCRIPT_DIR}/colors.sh"
 
+# Redefine logging functions to clean-overwrite the inline progress bar
+ok()      { printf '\r\033[K%s   %s✔ %s%s\n' "$(ts)" "$GREEN" "$1" "$RESET"; }
+warn()    { printf '\r\033[K%s   %s⚠ %s%s\n' "$(ts)" "$YELLOW" "$1" "$RESET"; }
+fail()    { printf '\r\033[K%s   %s✖ %s%s\n' "$(ts)" "$RED" "$1" "$RESET"; }
+info()    { printf '\r\033[K%s   %s%s%s\n' "$(ts)" "$DIM" "$1" "$RESET"; }
+step()    { printf '\r\033[K\n%s %s%s▸ %s%s\n' "$(ts)" "$CYAN" "$BOLD" "$1" "$RESET"; }
+header()  { printf '\r\033[K\n%s %s%s%s%s\n' "$(ts)" "$MAGENTA" "$BOLD" "$1" "$RESET"; }
+
 # ── Progress tracking ──────────────────────────────────────────
 show_progress() {
   local completed=0
@@ -269,11 +274,8 @@ show_progress() {
   local progress_str=" ${MAGENTA}${BOLD}Progress: [${bar}] ${pct}%${RESET} (${completed}/${total} tasks)"
 
   if [ -t 1 ]; then
-    # Interactive TTY: display dynamically on the last line of the screen
-    local lines
-    lines=$(tput lines 2>/dev/null || echo 24)
-    # Save cursor, move to last line, clear line, print progress, restore cursor
-    printf '\033[s\033[%d;1H\033[K%s\033[u' "$lines" "$progress_str"
+    # Interactive TTY: display dynamically using inline carriage return
+    printf '\r\033[K%s' "$progress_str"
   else
     # Non-interactive / log file: print a clean timestamped progress statement to avoid terminal escape garbage
     printf '%s   %s[Progress: %d%% (%d/%d tasks)]%s\n' "$(ts)" "$DIM" "$pct" "$completed" "$total" "$RESET"
@@ -1118,11 +1120,10 @@ wait_tier_healthy() {
 # ── Timer ─────────────────────────────────────────────────────
 DEPLOY_START=$SECONDS
 
-# ── Initialize scroll region and progress ─────────────────────
+# ── Reset scroll region and initialize progress ─────────────────
 if [ -t 1 ]; then
-  lines=$(tput lines 2>/dev/null || echo 24)
-  printf '\033[1;%dr' "$((lines - 1))"
-  printf '\033[%d;1H\033[K' "$lines"
+  # Reset scroll region in case it was broken by a previous aborted run
+  printf '\033[r'
 fi
 show_progress
 

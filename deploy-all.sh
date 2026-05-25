@@ -60,10 +60,6 @@ cleanup() {
     rm -rf "${LOG_DIR:-.deploy-logs}"/.health-* 2>/dev/null || true
     rm -f "${LOG_DIR:-.deploy-logs}"/*.pid 2>/dev/null || true
 
-    # Reset terminal scroll region to full screen and clear progress bar
-    if [ -t 1 ]; then
-      printf '\033[r\r\033[K'
-    fi
 
     # Play completion sound if not in a dry-run
     if [ "${DRY_RUN:-false}" = "false" ]; then
@@ -213,74 +209,7 @@ done
 # ── Colors & logging (shared) ─────────────────────────────────
 source "${SCRIPT_DIR}/colors.sh"
 
-# Redefine logging functions to clean-overwrite the inline progress bar and immediately redraw it on TTYs
-ok()      { printf '\r\033[K%s   %s✔ %s%s\n' "$(ts)" "$GREEN" "$1" "$RESET"; [ -t 1 ] && show_progress; }
-warn()    { printf '\r\033[K%s   %s⚠ %s%s\n' "$(ts)" "$YELLOW" "$1" "$RESET"; [ -t 1 ] && show_progress; }
-fail()    { printf '\r\033[K%s   %s✖ %s%s\n' "$(ts)" "$RED" "$1" "$RESET"; [ -t 1 ] && show_progress; }
-info()    { printf '\r\033[K%s   %s%s%s\n' "$(ts)" "$DIM" "$1" "$RESET"; [ -t 1 ] && show_progress; }
-step()    { printf '\r\033[K\n%s %s%s▸ %s%s\n' "$(ts)" "$CYAN" "$BOLD" "$1" "$RESET"; [ -t 1 ] && show_progress; }
-header()  { printf '\r\033[K\n%s %s%s%s%s\n' "$(ts)" "$MAGENTA" "$BOLD" "$1" "$RESET"; [ -t 1 ] && show_progress; }
 
-# ── Progress tracking ──────────────────────────────────────────
-show_progress() {
-  local completed=0
-  local total=0
-  local svc
-
-  for svc in "${ALL_SERVICES[@]}"; do
-    # Build task
-    total=$((total + 1))
-    if [ -f "${LOG_DIR}/${svc}.build.status" ]; then
-      completed=$((completed + 1))
-    fi
-
-    if ! $BUILD_ONLY; then
-      if ! $NO_PARALLEL; then
-        if should_deploy "$svc"; then
-          # Transfer task
-          total=$((total + 1))
-          if [ -f "${LOG_DIR}/${svc}.transfer.status" ]; then
-            completed=$((completed + 1))
-          fi
-        fi
-      fi
-
-      # Deploy/Restart task
-      total=$((total + 1))
-      if [ -f "${LOG_DIR}/${svc}.deploy.status" ]; then
-        completed=$((completed + 1))
-      fi
-    fi
-  done
-
-  local pct=0
-  if [ "$total" -gt 0 ]; then
-    pct=$(( completed * 100 / total ))
-  fi
-
-  if [ "$pct" -gt 100 ]; then
-    pct=100
-  fi
-
-  # Format progress bar (beautiful block indicators)
-  local width=30
-  local filled=$(( pct * width / 100 ))
-  local empty=$(( width - filled ))
-  local bar=""
-  local i
-  for ((i=0; i<filled; i++)); do bar="${bar}█"; done
-  for ((i=0; i<empty; i++)); do bar="${bar}░"; done
-
-  local progress_str=" ${MAGENTA}${BOLD}Progress: [${bar}] ${pct}%${RESET} (${completed}/${total} tasks)"
-
-  if [ -t 1 ]; then
-    # Interactive TTY: display dynamically using inline carriage return
-    printf '\r\033[K%s' "$progress_str"
-  else
-    # Non-interactive / log file: print a clean timestamped progress statement to avoid terminal escape garbage
-    printf '%s   %s[Progress: %d%% (%d/%d tasks)]%s\n' "$(ts)" "$DIM" "$pct" "$completed" "$total" "$RESET"
-  fi
-}
 
 # ── Service colors (semantic per-category shades) ────────────
 # Services=blue, Clients=green, Bots=yellow. Red is errors only.
@@ -523,17 +452,14 @@ run_phase() {
   if [ "$prefix" = "true" ]; then
     bash "${svc_dir}/deploy.sh" ${phase_flag} $flags 2>&1 \
       | tee "$log_file" \
-      | while IFS= read -r line; do
-          printf '\r\033[K%s %s%s[%s]%s %s\n' "$(ts)" "$color" "$BOLD" "$pad_svc" "$RESET" "$line"
-          [ -t 1 ] && show_progress
-        done \
-      && { echo "OK" > "$status_file"; show_progress; } \
-      || { echo "FAIL" > "$status_file"; show_progress; }
+      | while IFS= read -r line; do printf '%s %s%s[%s]%s %s\n' "$(ts)" "$color" "$BOLD" "$pad_svc" "$RESET" "$line"; done \
+      && { echo "OK" > "$status_file"; } \
+      || { echo "FAIL" > "$status_file"; }
   else
     bash "${svc_dir}/deploy.sh" ${phase_flag} $flags 2>&1 \
       | tee "$log_file" \
-      && { echo "OK" > "$status_file"; show_progress; } \
-      || { echo "FAIL" > "$status_file"; show_progress; }
+      && { echo "OK" > "$status_file"; } \
+      || { echo "FAIL" > "$status_file"; }
   fi
 
   # ── Persist deploy SHA marker for non-docker-build services ──
@@ -644,12 +570,10 @@ fire_builds() {
       else
         info "Skipping ${svc} (unchanged since last build)"
         echo "SKIP" > "${LOG_DIR}/${svc}.build.status"
-        show_progress
       fi
     else
       info "Skipping ${svc} (filtered)"
       echo "SKIP" > "${LOG_DIR}/${svc}.build.status"
-      show_progress
     fi
   done
 
@@ -765,7 +689,6 @@ fire_transfers() {
       build_status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "UNKNOWN")
       if [ "$build_status" != "OK" ]; then
         echo "SKIP" > "${LOG_DIR}/${svc}.transfer.status"
-        show_progress
         exit 0
       fi
 
@@ -838,7 +761,6 @@ restart_tier() {
   for svc in "${services[@]}"; do
     if ! should_deploy "$svc"; then
       echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
-      show_progress
       continue
     fi
 
@@ -851,10 +773,8 @@ restart_tier() {
       elif [ "$build_status" = "FAIL" ]; then
         fail "${svc}: build failed — skipping"
         echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
-        show_progress
       else
         echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
-        show_progress
       fi
     else
       # Parallel mode: check transfer status
@@ -865,7 +785,6 @@ restart_tier() {
       elif [ "$transfer_status" = "FAIL" ]; then
         fail "${svc}: transfer failed — skipping"
         echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
-        show_progress
       else
         # Transfer was skipped — check if the underlying build failed
         local _underlying_build
@@ -873,10 +792,8 @@ restart_tier() {
         if [ "$_underlying_build" = "FAIL" ]; then
           fail "${svc}: build failed — skipping"
           echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
-          show_progress
         else
           echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
-          show_progress
         fi
       fi
     fi
@@ -901,7 +818,6 @@ restart_tier() {
         local status
         status=$(cat "${LOG_DIR}/${svc}.restart.status" 2>/dev/null || echo "UNKNOWN")
         echo "$status" > "${LOG_DIR}/${svc}.deploy.status"
-        show_progress
       fi
       if [ "$status" = "OK" ]; then
         ok "${svc} restarted successfully"
@@ -931,11 +847,9 @@ restart_tier() {
       if [ "$status" = "OK" ]; then
         ok "${svc} restarted successfully"
         echo "OK" > "${LOG_DIR}/${svc}.deploy.status"
-        show_progress
       else
         fail "${svc} restart failed → ${LOG_DIR}/${svc}.restart.log"
         echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
-        show_progress
         any_failed=true
       fi
     done
@@ -968,14 +882,11 @@ deploy_tier() {
       elif [ "$build_status" = "FAIL" ]; then
         fail "${svc}: build failed — skipping deploy"
         echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
-        show_progress
       else
         echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
-        show_progress
       fi
     else
       echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
-      show_progress
     fi
   done
 
@@ -1123,12 +1034,6 @@ wait_tier_healthy() {
 # ── Timer ─────────────────────────────────────────────────────
 DEPLOY_START=$SECONDS
 
-# ── Reset scroll region and initialize progress ─────────────────
-if [ -t 1 ]; then
-  # Reset scroll region in case it was broken by a previous aborted run
-  printf '\033[r'
-fi
-show_progress
 
 # ── Header ────────────────────────────────────────────────────
 echo ""

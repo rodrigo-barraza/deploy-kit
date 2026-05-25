@@ -201,38 +201,68 @@ if ! $DEPLOY_ONLY; then
   # If the lockfile changed, auto-commit it so drift doesn't
   # recur on the next deploy.
   if [ -f "package-lock.json" ] && ! $DRY_RUN; then
-    step "Syncing dependencies"
+    local needs_sync=false
 
-    # Force re-resolve git-based deps (lockfile pins stale SHAs)
-    GIT_DEPS=$(node -e "
-      const p = require('./package.json');
-      const all = { ...p.dependencies, ...p.devDependencies };
-      const git = Object.keys(all).filter(k => /^(git\+|github:)/.test(all[k]));
-      if (git.length) console.log(git.join(' '));
-    " 2>/dev/null || true)
-    if [ -n "$GIT_DEPS" ]; then
-      info "Updating git deps: ${GIT_DEPS}"
-      npm update $GIT_DEPS 2>&1 | tail -3 | sed 's/^/  /'
+    if [ ! -d "node_modules" ]; then
+      needs_sync=true
+      info "node_modules not found — syncing dependencies..."
+    else
+      # Check if package.json has changed since the last successfully built image
+      local last_built_sha
+      last_built_sha=$(docker inspect --format '{{index .Config.Labels "git.sha"}}' "${IMAGE_NAME}:latest" 2>/dev/null || echo "")
+      if [ -n "$last_built_sha" ]; then
+        if ! git diff --quiet "$last_built_sha" HEAD -- package.json package-lock.json 2>/dev/null; then
+          needs_sync=true
+          info "package.json or package-lock.json modified since last build — syncing..."
+        fi
+      else
+        needs_sync=true
+        info "No previous build image found — syncing..."
+      fi
+
+      # Check if any library dependencies changed during Phase 0
+      if [ "${ANY_LIB_CHANGED:-false}" = "true" ]; then
+        needs_sync=true
+        info "Upstream libraries updated in Phase 0 — syncing..."
+      fi
     fi
 
-    npm install --ignore-scripts 2>&1 | tail -3 | sed 's/^/  /'
+    if $needs_sync; then
+      step "Syncing dependencies"
 
-    # No URL rewriting needed — Docker build uses --ssh default
-    # to forward the host SSH agent for private git deps.
+      # Force re-resolve git-based deps (lockfile pins stale SHAs)
+      GIT_DEPS=$(node -e "
+        const p = require('./package.json');
+        const all = { ...p.dependencies, ...p.devDependencies };
+        const git = Object.keys(all).filter(k => /^(git\+|github:)/.test(all[k]));
+        if (git.length) console.log(git.join(' '));
+      " 2>/dev/null || true)
+      if [ -n "$GIT_DEPS" ]; then
+        info "Updating git deps: ${GIT_DEPS}"
+        npm update $GIT_DEPS 2>&1 | tail -3 | sed 's/^/  /'
+      fi
 
-    if ! git diff --quiet package-lock.json 2>/dev/null; then
-      step "Lockfile out of sync — auto-committing"
-      git add package-lock.json
-      git commit -m "chore: sync package-lock.json
+      npm install --ignore-scripts 2>&1 | tail -3 | sed 's/^/  /'
+
+      # No URL rewriting needed — Docker build uses --ssh default
+      # to forward the host SSH agent for private git deps.
+
+      if ! git diff --quiet package-lock.json 2>/dev/null; then
+        step "Lockfile out of sync — auto-committing"
+        git add package-lock.json
+        git commit -m "chore: sync package-lock.json
 
 Auto-committed by deploy-kit — lockfile was out of sync with
 package.json, which causes npm ci failures in Docker." 2>&1 | sed 's/^/  /'
-      git push 2>&1 | sed 's/^/  /' || warn "Auto-push failed — lockfile committed locally only"
-      # Re-capture SHA after the auto-commit
-      GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-      ok "Lockfile committed and pushed (now at ${GIT_SHA})"
+        git push 2>&1 | sed 's/^/  /' || warn "Auto-push failed — lockfile committed locally only"
+        # Re-capture SHA after the auto-commit
+        GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+        ok "Lockfile committed and pushed (now at ${GIT_SHA})"
+      else
+        ok "Dependencies up to date"
+      fi
     else
-      ok "Dependencies up to date"
+      info "Dependencies up to date (skipped host sync)"
     fi
   fi
 

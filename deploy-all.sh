@@ -290,6 +290,8 @@ done
 
 # ── Flags ─────────────────────────────────────────────────────
 DRY_RUN=false
+ANY_LIB_CHANGED=false
+export ANY_LIB_CHANGED
 SKIP_PULL=false
 NO_CACHE=false
 NO_PARALLEL=false
@@ -713,7 +715,7 @@ wait_builds() {
 
     local pid
     pid=$(cat "$pid_file")
-    wait "$pid" || true
+    wait "$pid" 2>/dev/null || true
 
     local status
     status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "UNKNOWN")
@@ -801,7 +803,7 @@ wait_transfers() {
 
     local pid
     pid=$(cat "$pid_file")
-    wait "$pid" || true
+    wait "$pid" 2>/dev/null || true
 
     local status
     status=$(cat "${LOG_DIR}/${svc}.transfer.status" 2>/dev/null || echo "UNKNOWN")
@@ -918,7 +920,7 @@ restart_tier() {
     for entry in "${pids[@]}"; do
       local pid="${entry%%:*}"
       local svc="${entry##*:}"
-      wait "$pid" || true
+      wait "$pid" 2>/dev/null || true
       local status
       status=$(cat "${LOG_DIR}/${svc}.restart.status" 2>/dev/null || echo "UNKNOWN")
       if [ "$status" = "OK" ]; then
@@ -1010,7 +1012,7 @@ deploy_tier() {
     for entry in "${pids[@]}"; do
       local pid="${entry%%:*}"
       local svc="${entry##*:}"
-      wait "$pid" || true
+      wait "$pid" 2>/dev/null || true
       local status
       status=$(cat "${LOG_DIR}/${svc}.deploy.status" 2>/dev/null || echo "UNKNOWN")
       if [ "$status" = "OK" ]; then
@@ -1198,6 +1200,45 @@ if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN; then
   printf '%s%s│  Pull, rebuild dist/, and push shared libraries          │%s\n' "$YELLOW" "$BOLD" "$RESET"
   printf '%s%s└──────────────────────────────────────────────────────────┘%s\n' "$YELLOW" "$BOLD" "$RESET"
 
+  # Pre-pull all libraries in parallel to reduce sequential network latency
+  declare -A PULL_OUTPUTS
+  declare -A PULLED_CHANGES
+  if ! $SKIP_PULL; then
+    step "Pre-pulling libraries in parallel"
+    local pull_pids=()
+    for lib_id in "${LIBRARY_IDS[@]}"; do
+      lib_dir="${ROOT_DIR}/${lib_id}"
+      [ -d "$lib_dir" ] || continue
+      local pull_log="${LOG_DIR}/${lib_id}.pull.log"
+      (cd "$lib_dir" && git pull --ff-only 2>&1 > "$pull_log") &
+      pull_pids+=("$!:$lib_id:$pull_log")
+    done
+
+    for entry in "${pull_pids[@]}"; do
+      local pid="${entry%%:*}"
+      local rest="${entry#*:}"
+      local lib_id="${rest%%:*}"
+      local pull_log="${rest#*:}"
+      wait "$pid" 2>/dev/null || true
+      if [ -f "$pull_log" ]; then
+        local output
+        output=$(cat "$pull_log")
+        PULL_OUTPUTS[$lib_id]="$output"
+        if echo "$output" | grep -q -vE "Already up to date|Current branch.*is up to date"; then
+          PULLED_CHANGES[$lib_id]=true
+        else
+          PULLED_CHANGES[$lib_id]=false
+        fi
+        rm -f "$pull_log"
+      else
+        PULLED_CHANGES[$lib_id]=true
+      fi
+    done
+  fi
+
+  declare -A LIB_UPDATED
+  ANY_LIB_CHANGED=false
+
   for lib_id in "${LIBRARY_IDS[@]}"; do
     lib_dir="${ROOT_DIR}/${lib_id}"
     if [ ! -d "$lib_dir" ]; then
@@ -1207,53 +1248,79 @@ if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN; then
 
     step "Syncing ${lib_id}"
 
-    # Pull latest
+    # Print parallel pre-pulled output
     if ! $SKIP_PULL; then
-      (cd "$lib_dir" && git pull --ff-only 2>&1) | sed 's/^/  /' || true
+      if [ -n "${PULL_OUTPUTS[$lib_id]:-}" ]; then
+        echo "${PULL_OUTPUTS[$lib_id]}" | sed 's/^/  /'
+      fi
     fi
 
-    # Always rebuild dist/ — tsc is fast (<3s) and guarantees freshness
-    info "Building dist/"
-    (cd "$lib_dir" && npm run build 2>&1) | sed 's/^/  /' || {
-      warn "${lib_id}: build failed — continuing with existing dist/"
-      continue
-    }
+    # Check for local uncommitted changes
+    _has_uncommitted=false
+    if ! (cd "$lib_dir" && git diff --quiet HEAD -- . 2>/dev/null) || \
+       [ -n "$(cd "$lib_dir" && git ls-files --others --exclude-standard . 2>/dev/null)" ]; then
+      _has_uncommitted=true
+    fi
 
-    # Stage, commit, and push if dist/ changed
-    _lib_has_changes=false
-    if (cd "$lib_dir" && git diff --quiet dist/ 2>/dev/null); then
-      # Check for untracked files in dist/
-      if [ -n "$(cd "$lib_dir" && git ls-files --others --exclude-standard dist/ 2>/dev/null)" ]; then
+    # Skip build if nothing changed and dist exists
+    _needs_build=true
+    if [ "${PULLED_CHANGES[$lib_id]:-false}" = "false" ] && ! $_has_uncommitted && [ -d "${lib_dir}/dist" ]; then
+      _needs_build=false
+    fi
+
+    if ! $_needs_build; then
+      ok "${lib_id}: dist/ already up to date (no changes)"
+      LIB_UPDATED[$lib_id]=false
+    else
+      info "Building dist/"
+      (cd "$lib_dir" && npm run build 2>&1) | sed 's/^/  /' || {
+        warn "${lib_id}: build failed — continuing with existing dist/"
+        LIB_UPDATED[$lib_id]=false
+        continue
+      }
+
+      # Stage, commit, and push if dist/ changed
+      _lib_has_changes=false
+      if (cd "$lib_dir" && git diff --quiet dist/ 2>/dev/null); then
+        # Check for untracked files in dist/
+        if [ -n "$(cd "$lib_dir" && git ls-files --others --exclude-standard dist/ 2>/dev/null)" ]; then
+          _lib_has_changes=true
+        fi
+      else
         _lib_has_changes=true
       fi
-    else
-      _lib_has_changes=true
-    fi
 
-    if $_lib_has_changes; then
-      (cd "$lib_dir" && git add dist/ && git commit -m "build: rebuild dist/" --no-verify 2>&1) | sed 's/^/  /' || true
-      (cd "$lib_dir" && git push origin HEAD 2>&1) | sed 's/^/  /' || true
-      ok "${lib_id}: dist/ rebuilt and pushed"
-    else
-      ok "${lib_id}: dist/ already up to date"
+      if $_lib_has_changes; then
+        (cd "$lib_dir" && git add dist/ && git commit -m "build: rebuild dist/" --no-verify 2>&1) | sed 's/^/  /' || true
+        (cd "$lib_dir" && git push origin HEAD 2>&1) | sed 's/^/  /' || true
+        ok "${lib_id}: dist/ rebuilt and pushed"
+        LIB_UPDATED[$lib_id]=true
+        ANY_LIB_CHANGED=true
+      else
+        ok "${lib_id}: dist/ already up to date"
+        LIB_UPDATED[$lib_id]=false
+      fi
     fi
   done
 
   # ── Refresh inter-library git dependencies ─────────────────
   # Libraries that depend on other libraries via git+https:// may
   # have stale copies in node_modules after upstream dist/ was rebuilt
-  # and pushed. Re-install to pull the fresh commit.
+  # and pushed. Re-install to pull the fresh commit. Only run if
+  # one of its specific library dependencies was updated in this run.
   for lib_id in "${LIBRARY_IDS[@]}"; do
     lib_dir="${ROOT_DIR}/${lib_id}"
     [ -d "$lib_dir" ] || continue
 
-    # Check if this library has any git-based deps on other libraries
+    # Check if this library has any git-based deps on other libraries that were updated
     _needs_refresh=false
     for other_id in "${LIBRARY_IDS[@]}"; do
       [ "$other_id" = "$lib_id" ] && continue
       if grep -q "\"@rodrigo-barraza/${other_id}\"" "$lib_dir/package.json" 2>/dev/null; then
-        _needs_refresh=true
-        break
+        if [ "${LIB_UPDATED[$other_id]:-false}" = "true" ]; then
+          _needs_refresh=true
+          break
+        fi
       fi
     done
 
@@ -1269,6 +1336,8 @@ if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN; then
           (cd "$lib_dir" && git add dist/ && git commit -m "build: rebuild dist/ with updated deps" --no-verify 2>&1) | sed 's/^/  /' || true
           (cd "$lib_dir" && git push origin HEAD 2>&1) | sed 's/^/  /' || true
           ok "${lib_id}: rebuilt and pushed with fresh deps"
+          LIB_UPDATED[$lib_id]=true
+          ANY_LIB_CHANGED=true
         else
           ok "${lib_id}: dist/ unchanged after dep refresh"
         fi

@@ -209,6 +209,38 @@ done
 # ── Colors & logging (shared) ─────────────────────────────────
 source "${SCRIPT_DIR}/colors.sh"
 
+# ── Inline progress percentage ────────────────────────────────
+# Lightweight counter that scans status files to compute completion.
+# Returns a zero-padded percentage string like "001%" or "025%" or "100%".
+progress_percentage() {
+  local completed=0
+  local total=0
+  local svc
+  for svc in "${ALL_SERVICES[@]}"; do
+    total=$((total + 1))
+    [ -f "${LOG_DIR}/${svc}.build.status" ] && completed=$((completed + 1))
+    if ! $BUILD_ONLY; then
+      if ! $NO_PARALLEL; then
+        if should_deploy "$svc"; then
+          total=$((total + 1))
+          [ -f "${LOG_DIR}/${svc}.transfer.status" ] && completed=$((completed + 1))
+        fi
+      fi
+      total=$((total + 1))
+      [ -f "${LOG_DIR}/${svc}.deploy.status" ] && completed=$((completed + 1))
+    fi
+  done
+  local percentage=0
+  [ "$total" -gt 0 ] && percentage=$(( completed * 100 / total ))
+  [ "$percentage" -gt 100 ] && percentage=100
+  printf '%03d%%' "$percentage"
+}
+
+# Override ts() to prepend elapsed seconds and progress percentage before the timestamp
+ts() {
+  local elapsed=$(( SECONDS - ${DEPLOY_START:-$SECONDS} ))
+  printf '%s%04ds %s %s%s' "$DIM" "$elapsed" "$(progress_percentage)" "$(date +%H:%M:%S)" "$RESET"
+}
 
 
 # ── Service colors (semantic per-category shades) ────────────

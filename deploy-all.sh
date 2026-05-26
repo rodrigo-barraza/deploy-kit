@@ -1304,9 +1304,19 @@ if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN && ! $SKIP_DEPS; then
       _has_changes=true
     fi
 
-    # Skip build if nothing changed and dist exists
+    # Check if dist/ is stale (src/ has newer commits than dist/ since the build output is committed)
+    _dist_stale=false
+    if [ -d "${lib_dir}/src" ] && [ -d "${lib_dir}/dist" ]; then
+      src_time=$(cd "$lib_dir" && git log -1 --format="%ct" -- src 2>/dev/null || echo 0)
+      dist_time=$(cd "$lib_dir" && git log -1 --format="%ct" -- dist 2>/dev/null || echo 0)
+      if [ "$src_time" -gt "$dist_time" ]; then
+        _dist_stale=true
+      fi
+    fi
+
+    # Skip build if nothing changed, dist exists, and is not stale
     _needs_build=true
-    if [ "${PULLED_CHANGES[$lib_id]:-false}" = "false" ] && ! $_has_changes && [ -d "${lib_dir}/dist" ]; then
+    if [ "${PULLED_CHANGES[$lib_id]:-false}" = "false" ] && ! $_has_changes && [ -d "${lib_dir}/dist" ] && ! $_dist_stale; then
       _needs_build=false
     fi
 

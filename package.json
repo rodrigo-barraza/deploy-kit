@@ -17,6 +17,7 @@
     "cleanup": "bash cleanup-local-images.sh",
     "cleanup:force": "bash cleanup-local-images.sh --force",
     "deploy:sync": "bash sync-deploy-scripts.sh",
+    "verify:deps": "node scripts/verify-dependencies.js",
     "deploy:clankerbox-client": "bash ../clankerbox-client/deploy.sh",
     "deploy:clankerbox-service": "bash ../clankerbox-service/deploy.sh",
     "deploy:classic-whitemane-client": "bash ../classic-whitemane-client/deploy.sh",

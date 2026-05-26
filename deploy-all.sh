@@ -123,6 +123,7 @@ declare -A TIER_SERVICES  # tier -> space-separated service IDs
 declare -A SVC_HEALTH_URL # service-id -> health check URL
 declare -A SVC_DEPLOY_TARGET  # service-id -> device ID
 declare -A SVC_LIB_DEPS   # service-id -> space-separated library dependency IDs
+declare -A SVC_DEPS       # service-id -> space-separated all dependency IDs
 
 # Device metadata (populated from projects.json devices array)
 declare -A DEVICE_METHOD      # device-id -> ssh | docker-api
@@ -187,18 +188,121 @@ eval "$(node -e "
     console.log('TIER_' + t + '=(' + ids + ')');
   }
 
-  // Emit library dependencies for each project
+  // ── DYNAMIC RUNTIME DEPENDENCY SCANNING ──
+  const fs = require('fs');
+  const path = require('path');
+  const allProjectIds = s.projects.map(p => p.id);
+  const infraIds = (s.infrastructure || []).map(i => i.id);
+  const candidateIds = [...allProjectIds, ...infraIds, 'mongodb', 'minio'];
   const libs = s.projects.filter(p => p.projectType === 'Library');
   const libIds = new Set(libs.map(l => l.id));
+
+  const libDeps = {};
+  libs.forEach(l => { libDeps[l.id] = []; });
+
   for (const proj of s.projects) {
-    if (proj.projectType === 'Library') continue;
-    const deps = (proj.dependsOn || [])
-      .map(d => d.id)
-      .filter(id => libIds.has(id));
-    if (deps.length > 0) {
-      console.log('SVC_LIB_DEPS[' + proj.id + ']=\"' + deps.join(' ') + '\"');
+    const projDir = path.join('$ROOT_DIR', proj.id);
+    const pkgPath = path.join(projDir, 'package.json');
+    const detectedDeps = new Set();
+    const detectedLibDeps = new Set();
+
+    // 1. Scan package.json for npm dependencies
+    if (fs.existsSync(pkgPath)) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+        Object.keys(deps).forEach(dep => {
+          if (dep.startsWith('@rodrigo-barraza/')) {
+            const libId = dep.replace('@rodrigo-barraza/', '');
+            if (libIds.has(libId)) {
+              detectedLibDeps.add(libId);
+              detectedDeps.add(libId);
+              if (proj.projectType === 'Library') {
+                libDeps[proj.id].push(libId);
+              }
+            }
+          } else if (candidateIds.includes(dep)) {
+            detectedDeps.add(dep);
+          }
+        });
+      } catch (e) {}
+    }
+
+    // 2. Scan source code files under src/
+    const scanDir = path.join(projDir, 'src');
+    if (fs.existsSync(scanDir)) {
+      const filesToScan = [];
+      const collectFiles = (dir) => {
+        try {
+          fs.readdirSync(dir).forEach(file => {
+            const fullPath = path.join(dir, file);
+            const stat = fs.statSync(fullPath);
+            if (stat.isDirectory()) {
+              collectFiles(fullPath);
+            } else if (stat.isFile() && /\.(tsx?|jsx?|json|js)$/.test(file) && !file.includes('.test.')) {
+              filesToScan.push(fullPath);
+            }
+          });
+        } catch (e) {}
+      };
+      collectFiles(scanDir);
+
+      filesToScan.forEach(file => {
+        try {
+          const content = fs.readFileSync(file, 'utf8');
+          if (/mongoose|mongodb:\/\//.test(content)) {
+            detectedDeps.add('mongodb');
+          }
+          if (/minioBucket|s3Client|@aws-sdk\/client-s3/.test(content)) {
+            detectedDeps.add('minio');
+          }
+          
+          // Tokenize content by word boundaries to ensure precise project ID matching
+          const words = new Set(content.split(/[^a-zA-Z0-9_-]/));
+          candidateIds.forEach(id => {
+            if (id === proj.id) return;
+            if (words.has(id)) {
+              detectedDeps.add(id);
+              if (libIds.has(id)) {
+                detectedLibDeps.add(id);
+                if (proj.projectType === 'Library') {
+                  libDeps[proj.id].push(id);
+                }
+              }
+            }
+          });
+        } catch (e) {}
+      });
+    }
+
+    // 3. Vault Service dependency (universal for services/clients)
+    if (proj.id !== 'vault-service' && proj.projectType !== 'Library' && proj.projectType !== 'Tool' && proj.projectType !== 'Kit') {
+      detectedDeps.add('vault-service');
+    }
+
+    // Emit detected dependencies
+    if (detectedLibDeps.size > 0) {
+      console.log('SVC_LIB_DEPS[' + proj.id + ']=\"' + [...detectedLibDeps].join(' ') + '\"');
+    }
+    if (detectedDeps.size > 0) {
+      console.log('SVC_DEPS[' + proj.id + ']=\"' + [...detectedDeps].join(' ') + '\"');
     }
   }
+
+  // 4. Compute Library Topological Order dynamically
+  const sorted = [];
+  const visited = new Set();
+  function visit(id) {
+    if (visited.has(id)) return;
+    visited.add(id);
+    const deps = libDeps[id] || [];
+    for (const dep of deps) {
+      visit(dep);
+    }
+    sorted.push(id);
+  }
+  libs.forEach(l => visit(l.id));
+  console.log('LIBRARY_IDS=(' + sorted.join(' ') + ')');
 ")"
 
 for s in "${!TIER_SERVICES[@]}"; do
@@ -1126,28 +1230,8 @@ fi
 # pulls latest, rebuilds dist/ if source changed, and pushes.
 # ══════════════════════════════════════════════════════════════
 
-# Discover library projects from projects.json (topological order)
-LIBRARY_IDS=()
-eval "$(node -e "
-  const s = require('$PROJECTS_JSON');
-  const libs = s.projects.filter(p => p.projectType === 'Library');
-  // Topological sort: emit libraries with no deps first
-  const libIds = new Set(libs.map(l => l.id));
-  const sorted = [];
-  const visited = new Set();
-  function visit(id) {
-    if (visited.has(id)) return;
-    visited.add(id);
-    const lib = libs.find(l => l.id === id);
-    if (!lib) return;
-    for (const dep of (lib.dependsOn || [])) {
-      if (libIds.has(dep.id)) visit(dep.id);
-    }
-    sorted.push(id);
-  }
-  libs.forEach(l => visit(l.id));
-  console.log('LIBRARY_IDS=(' + sorted.join(' ') + ')');
-")"
+# Discover library projects dynamically (topological order scanned from package.json)
+# LIBRARY_IDS was already populated dynamically at startup
 
 if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN && ! $SKIP_DEPS; then
   echo ""

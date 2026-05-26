@@ -298,10 +298,10 @@ package.json, which causes npm ci failures in Docker." 2>&1 | sed 's/^/  /'
     BUILD_START_INNER=$SECONDS
     temp_log=$(mktemp "/tmp/docker-build-${IMAGE_NAME}-XXXXXX.log")
     
-    # Start a background progress ticker to reassure the user
+    # Start a background progress ticker to reassure the user (loops only while parent process $$ is alive)
     elapsed=0
     (
-      while true; do
+      while kill -0 "$$" 2>/dev/null; do
         sleep 10
         elapsed=$((elapsed + 10))
         echo "  Still building... (${elapsed}s elapsed)"

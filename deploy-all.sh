@@ -23,6 +23,7 @@
 #   npm run deploy -- --skip-pull          # skip git pull
 #   npm run deploy -- --no-cache           # rebuild images from scratch
 #   npm run deploy -- --changed-only       # only build+deploy services with git changes
+#   npm run deploy -- --skip-deps          # skip library build and dependency change checks
 #   npm run deploy -- --build-only          # build Docker images only (no transfer/restart)
 #   npm run deploy -- --only=prism-service,prism-client  # deploy specific services
 #   npm run deploy -- --skip=lupos-bot,lights-service  # skip specific services
@@ -261,6 +262,7 @@ NO_PARALLEL=false
 ONLY=""
 SKIP_LIST=""
 CHANGED_ONLY=false
+SKIP_DEPS=false
 BUILD_ONLY=false
 COMPACT_WSL=false
 GROUP=""
@@ -278,6 +280,7 @@ for arg in "$@"; do
     --no-cache)       NO_CACHE=true ;;
     --no-parallel)    NO_PARALLEL=true ;;
     --changed-only)   CHANGED_ONLY=true ;;
+    --skip-deps)      SKIP_DEPS=true ;;
     --build-only)     BUILD_ONLY=true ;;
     --compact-wsl)    COMPACT_WSL=true ;;
     --only=*)         ONLY="${arg#--only=}" ;;
@@ -393,7 +396,7 @@ has_changes() {
   fi
 
   # Check if any library dependency has changed since the last deploy of this service
-  if [ -n "${SVC_LIB_DEPS[$svc]:-}" ]; then
+  if ! $SKIP_DEPS && [ -n "${SVC_LIB_DEPS[$svc]:-}" ]; then
     local dep_file="${DEPLOY_STATE_DIR}/${svc}.deps.sha"
     if [ ! -f "$dep_file" ]; then
       # Quietly initialize the dependency marker file to prevent false-positive initial bootstrap builds
@@ -1091,6 +1094,9 @@ fi
 if $CHANGED_ONLY; then
   printf '  %sMode: changed-only (skipping unchanged services)%s\n' "$CYAN" "$RESET"
 fi
+if $SKIP_DEPS; then
+  printf '  %sMode: skip-deps (skipping library sync and dependency change checks)%s\n' "$CYAN" "$RESET"
+fi
 if $BUILD_ONLY; then
   printf '%s%s  ⚠  BUILD ONLY — no transfer or restart will be performed%s\n' "$YELLOW" "$BOLD" "$RESET"
 fi
@@ -1138,7 +1144,7 @@ eval "$(node -e "
   console.log('LIBRARY_IDS=(' + sorted.join(' ') + ')');
 ")"
 
-if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN; then
+if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN && ! $SKIP_DEPS; then
   echo ""
   printf '%s%s┌──────────────────────────────────────────────────────────┐%s\n' "$YELLOW" "$BOLD" "$RESET"
   printf '%s%s│  PHASE 0 — LIBRARY SYNC                                 │%s\n' "$YELLOW" "$BOLD" "$RESET"

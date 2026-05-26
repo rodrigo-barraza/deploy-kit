@@ -30,6 +30,9 @@ npm run deploy:dry
 
 # Deploy only changed services
 npm run deploy:changed
+
+# Deploy only changed services, skipping dependency checks
+npm run deploy:changed:no-deps
 ```
 
 ### Group Deploy
@@ -78,6 +81,7 @@ npm run deploy -- --skip=lupos-bot,lights-service
 | `--no-cache` | Rebuild images from scratch |
 | `--no-parallel` | Disable parallel builds |
 | `--changed-only` | Only build+deploy services with git changes |
+| `--skip-deps` | Skip library build and dependency change checks |
 | `--only=a,b` | Deploy only these specific services |
 | `--skip=a,b` | Skip these specific services |
 | `--clients` | Deploy all `*-client` services |
@@ -243,6 +247,7 @@ npm run cleanup          # Clean up local Docker images
 npm run cleanup:force    # Force clean up local Docker images
 npm run deploy:bots      # Deploy all bot services
 npm run deploy:changed   # Deploy only services with git changes
+npm run deploy:changed:no-deps # Deploy changed services, skipping library sync and dependency change checks
 npm run deploy:clients   # Deploy all client applications
 npm run deploy:services  # Deploy all backend services (excl. vault)
 npm run deploy:sync      # Sync deploy.sh scripts across projects

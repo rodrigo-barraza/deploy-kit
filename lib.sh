@@ -201,14 +201,14 @@ if ! $DEPLOY_ONLY; then
   # If the lockfile changed, auto-commit it so drift doesn't
   # recur on the next deploy.
   if [ -f "package-lock.json" ] && ! $DRY_RUN; then
-    local needs_sync=false
+    needs_sync=false
 
     if [ ! -d "node_modules" ]; then
       needs_sync=true
       info "node_modules not found — syncing dependencies..."
     else
       # Check if package.json has changed since the last successfully built image
-      local last_built_sha
+      last_built_sha
       last_built_sha=$(docker inspect --format '{{index .Config.Labels "git.sha"}}' "${IMAGE_NAME}:latest" 2>/dev/null || echo "")
       if [ -n "$last_built_sha" ]; then
         if ! git diff --quiet "$last_built_sha" HEAD -- package.json package-lock.json 2>/dev/null; then
@@ -296,11 +296,10 @@ package.json, which causes npm ci failures in Docker." 2>&1 | sed 's/^/  /'
     info "(skipped — dry run)"
   else
     BUILD_START_INNER=$SECONDS
-    local temp_log
     temp_log=$(mktemp "/tmp/docker-build-${IMAGE_NAME}-XXXXXX.log")
     
     # Start a background progress ticker to reassure the user
-    local elapsed=0
+    elapsed=0
     (
       while true; do
         sleep 10
@@ -308,7 +307,7 @@ package.json, which causes npm ci failures in Docker." 2>&1 | sed 's/^/  /'
         echo "  Still building... (${elapsed}s elapsed)"
       done
     ) &
-    local ticker_pid=$!
+    ticker_pid=$!
 
     set +e
     timeout --kill-after=30 "${BUILD_TIMEOUT}" \

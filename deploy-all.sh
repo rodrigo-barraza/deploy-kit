@@ -494,7 +494,8 @@ has_changes() {
   fi
 
   # Check if there are any changes since that SHA in the service itself
-  if ! (cd "$svc_dir" && git diff --quiet "$last_sha" HEAD -- . 2>/dev/null); then
+  if ! (cd "$svc_dir" && git diff --quiet "$last_sha" -- . 2>/dev/null) || \
+     [ -n "$(cd "$svc_dir" && git ls-files --others --exclude-standard . 2>/dev/null)" ]; then
     # Has changes
     return 0
   fi

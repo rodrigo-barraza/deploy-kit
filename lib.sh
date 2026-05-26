@@ -207,8 +207,6 @@ if ! $DEPLOY_ONLY; then
       needs_sync=true
       info "node_modules not found — syncing dependencies..."
     else
-      # Check if package.json has changed since the last successfully built image
-      last_built_sha
       last_built_sha=$(docker inspect --format '{{index .Config.Labels "git.sha"}}' "${IMAGE_NAME}:latest" 2>/dev/null || echo "")
       if [ -n "$last_built_sha" ]; then
         if ! git diff --quiet "$last_built_sha" HEAD -- package.json package-lock.json 2>/dev/null; then
@@ -220,10 +218,56 @@ if ! $DEPLOY_ONLY; then
         info "No previous build image found — syncing..."
       fi
 
-      # Check if any library dependencies changed during Phase 0
       if [ "${ANY_LIB_CHANGED:-false}" = "true" ]; then
         needs_sync=true
         info "Upstream libraries updated in Phase 0 — syncing..."
+      fi
+
+      if ! $needs_sync; then
+        stale_workspace_libs=$(node -e "
+          const fs = require('fs');
+          const path = require('path');
+          try {
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+            const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+            const customDeps = Object.keys(allDeps).filter(dep => dep.startsWith('@rodrigo-barraza/'));
+            
+            const stale = [];
+            for (const dep of customDeps) {
+              const libName = dep.replace('@rodrigo-barraza/', '');
+              const libDir = path.resolve('..', libName);
+              if (!fs.existsSync(libDir)) continue;
+              
+              let lockedSha = '';
+              const lockKey = 'node_modules/' + dep;
+              if (lock.packages && lock.packages[lockKey] && lock.packages[lockKey].resolved) {
+                const resolved = lock.packages[lockKey].resolved;
+                const hashIndex = resolved.indexOf('#');
+                if (hashIndex !== -1) lockedSha = resolved.substring(hashIndex + 1);
+              } else if (lock.dependencies && lock.dependencies[dep] && lock.dependencies[dep].version) {
+                const version = lock.dependencies[dep].version;
+                const hashIndex = version.indexOf('#');
+                if (hashIndex !== -1) lockedSha = version.substring(hashIndex + 1);
+              }
+              
+              if (!lockedSha) continue;
+              
+              try {
+                const execSync = require('child_process').execSync;
+                const currentSha = execSync('git rev-parse HEAD', { cwd: libDir }).toString().trim();
+                if (currentSha && !lockedSha.startsWith(currentSha) && !currentSha.startsWith(lockedSha)) {
+                  stale.push(libName);
+                }
+              } catch (err) {}
+            }
+            if (stale.length > 0) console.log(stale.join(' '));
+          } catch (e) {}
+        " 2>/dev/null || true)
+        if [ -n "$stale_workspace_libs" ]; then
+          needs_sync=true
+          info "Stale workspace library locks detected (${stale_workspace_libs}) — syncing..."
+        fi
       fi
     fi
 

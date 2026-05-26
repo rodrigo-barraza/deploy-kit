@@ -204,9 +204,9 @@ GROUP=""
 MAX_CONCURRENT_BUILDS=32  # Limit concurrent docker builds to prevent I/O saturation
 # Detect WSL2 and automatically reduce builds to prevent CPU/IO starvation
 if grep -qi microsoft /proc/version 2>/dev/null; then
-  MAX_CONCURRENT_BUILDS=4
+  MAX_CONCURRENT_BUILDS=16
 fi
-MAX_CONCURRENT_SSH=6      # Limit concurrent SSH operations to prevent MaxSessions drop
+MAX_CONCURRENT_SSH=32     # SSH multiplexing (ControlMaster) shares one socket — no MaxSessions concern
 
 for arg in "$@"; do
   case "$arg" in

@@ -1057,9 +1057,10 @@ fi
 
 # ══════════════════════════════════════════════════════════════
 # PHASE 0 — LIBRARY SYNC
-# Git-hosted libraries commit their dist/ so downstream services
-# get pre-built JS via npm ci (no prepare/tsc needed). This phase
-# pulls latest, rebuilds dist/ if source changed, and pushes.
+# Shared libraries build their dist/ automatically via git pre-commit
+# hooks. This phase pulls latest to ensure the local developer
+# workspace is in sync and checks for any changes (remote or local)
+# to trigger downstream dependency updates.
 # ══════════════════════════════════════════════════════════════
 
 # Discover library projects dynamically (topological order scanned from package.json)
@@ -1069,7 +1070,7 @@ if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN && ! $SKIP_DEPS; then
   echo ""
   printf '%s%s┌──────────────────────────────────────────────────────────┐%s\n' "$YELLOW" "$BOLD" "$RESET"
   printf '%s%s│  PHASE 0 — LIBRARY SYNC                                 │%s\n' "$YELLOW" "$BOLD" "$RESET"
-  printf '%s%s│  Pull, rebuild dist/, and push shared libraries          │%s\n' "$YELLOW" "$BOLD" "$RESET"
+  printf '%s%s│  Pull latest shared libraries and check for changes      │%s\n' "$YELLOW" "$BOLD" "$RESET"
   printf '%s%s└──────────────────────────────────────────────────────────┘%s\n' "$YELLOW" "$BOLD" "$RESET"
 
   # Pre-pull all libraries in parallel to reduce sequential network latency
@@ -1107,7 +1108,6 @@ if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN && ! $SKIP_DEPS; then
     done
   fi
 
-  declare -A LIB_UPDATED
   ANY_LIB_CHANGED=false
 
   for lib_id in "${LIBRARY_IDS[@]}"; do
@@ -1136,98 +1136,14 @@ if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN && ! $SKIP_DEPS; then
       _has_changes=true
     fi
 
-    # Check if dist/ is stale (src/ has newer commits than dist/ since the build output is committed)
-    _dist_stale=false
-    if [ -d "${lib_dir}/src" ] && [ -d "${lib_dir}/dist" ]; then
-      src_time=$(cd "$lib_dir" && git log -1 --format="%ct" -- src 2>/dev/null || echo 0)
-      dist_time=$(cd "$lib_dir" && git log -1 --format="%ct" -- dist 2>/dev/null || echo 0)
-      if [ "$src_time" -gt "$dist_time" ]; then
-        _dist_stale=true
-      fi
-    fi
-
-    # Skip build if nothing changed, dist exists, and is not stale
-    _needs_build=true
-    if [ "${PULLED_CHANGES[$lib_id]:-false}" = "false" ] && ! $_has_changes && [ -d "${lib_dir}/dist" ] && ! $_dist_stale; then
-      _needs_build=false
-    fi
-
-    if ! $_needs_build; then
-      ok "${lib_id}: dist/ already up to date (no changes)"
-      LIB_UPDATED[$lib_id]=false
+    if [ "${PULLED_CHANGES[$lib_id]:-false}" = "true" ]; then
+      ok "${lib_id}: pulled latest changes from remote"
+      ANY_LIB_CHANGED=true
+    elif $_has_changes; then
+      info "${lib_id}: has local changes or unpushed commits (will trigger downstream rebuilds)"
+      ANY_LIB_CHANGED=true
     else
-      info "Building dist/"
-      (cd "$lib_dir" && npm run build 2>&1) | sed 's/^/  /' || {
-        warn "${lib_id}: build failed — continuing with existing dist/"
-        LIB_UPDATED[$lib_id]=false
-        continue
-      }
-
-      # Stage, commit, and push if dist/ changed
-      _lib_has_changes=false
-      if (cd "$lib_dir" && git diff --quiet dist/ 2>/dev/null); then
-        # Check for untracked files in dist/
-        if [ -n "$(cd "$lib_dir" && git ls-files --others --exclude-standard dist/ 2>/dev/null)" ]; then
-          _lib_has_changes=true
-        fi
-      else
-        _lib_has_changes=true
-      fi
-
-      if $_lib_has_changes; then
-        (cd "$lib_dir" && git add dist/ && git commit -m "build: rebuild dist/" --no-verify 2>&1) | sed 's/^/  /' || true
-        (cd "$lib_dir" && git push origin HEAD 2>&1) | sed 's/^/  /' || true
-        ok "${lib_id}: dist/ rebuilt and pushed"
-        LIB_UPDATED[$lib_id]=true
-        ANY_LIB_CHANGED=true
-      else
-        ok "${lib_id}: dist/ already up to date"
-        LIB_UPDATED[$lib_id]=false
-      fi
-    fi
-  done
-
-  # ── Refresh inter-library git dependencies ─────────────────
-  # Libraries that depend on other libraries via git+https:// may
-  # have stale copies in node_modules after upstream dist/ was rebuilt
-  # and pushed. Re-install to pull the fresh commit. Only run if
-  # one of its specific library dependencies was updated in this run.
-  for lib_id in "${LIBRARY_IDS[@]}"; do
-    lib_dir="${ROOT_DIR}/${lib_id}"
-    [ -d "$lib_dir" ] || continue
-
-    # Check if this library has any git-based deps on other libraries that were updated
-    _needs_refresh=false
-    for other_id in "${LIBRARY_IDS[@]}"; do
-      [ "$other_id" = "$lib_id" ] && continue
-      if grep -q "\"@rodrigo-barraza/${other_id}\"" "$lib_dir/package.json" 2>/dev/null; then
-        if [ "${LIB_UPDATED[$other_id]:-false}" = "true" ]; then
-          _needs_refresh=true
-          break
-        fi
-      fi
-    done
-
-    if $_needs_refresh; then
-      step "Refreshing ${lib_id} dependencies (inter-library git deps)"
-      (cd "$lib_dir" && npm install 2>&1) | sed 's/^/  /' || warn "${lib_id}: npm install failed"
-      # Rebuild after refreshing deps
-      info "Rebuilding ${lib_id} with updated dependencies"
-      if (cd "$lib_dir" && npm run build 2>&1) | sed 's/^/  /'; then
-        # Commit + push if dist/ changed after rebuild
-        if ! (cd "$lib_dir" && git diff --quiet dist/ 2>/dev/null) || \
-           [ -n "$(cd "$lib_dir" && git ls-files --others --exclude-standard dist/ 2>/dev/null)" ]; then
-          (cd "$lib_dir" && git add dist/ && git commit -m "build: rebuild dist/ with updated deps" --no-verify 2>&1) | sed 's/^/  /' || true
-          (cd "$lib_dir" && git push origin HEAD 2>&1) | sed 's/^/  /' || true
-          ok "${lib_id}: rebuilt and pushed with fresh deps"
-          LIB_UPDATED[$lib_id]=true
-          ANY_LIB_CHANGED=true
-        else
-          ok "${lib_id}: dist/ unchanged after dep refresh"
-        fi
-      else
-        warn "${lib_id}: rebuild with updated deps failed — continuing with existing dist/"
-      fi
+      ok "${lib_id}: up to date (no changes)"
     fi
   done
 fi

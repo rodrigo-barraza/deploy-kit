@@ -296,10 +296,22 @@ package.json, which causes npm ci failures in Docker." 2>&1 | sed 's/^/  /'
     info "(skipped — dry run)"
   else
     BUILD_START_INNER=$SECONDS
-    # Run with pipefail in a subshell so tail/sed don't swallow build failures.
-    # timeout is a safety net — sends SIGTERM, then SIGKILL after 30s.
+    local temp_log
+    temp_log=$(mktemp "/tmp/docker-build-${IMAGE_NAME}-XXXXXX.log")
+    
+    # Start a background progress ticker to reassure the user
+    local elapsed=0
+    (
+      while true; do
+        sleep 10
+        elapsed=$((elapsed + 10))
+        echo "  Still building... (${elapsed}s elapsed)"
+      done
+    ) &
+    local ticker_pid=$!
+
     set +e
-    (set -o pipefail; timeout --kill-after=30 "${BUILD_TIMEOUT}" \
+    timeout --kill-after=30 "${BUILD_TIMEOUT}" \
       docker buildx build \
       --load \
       --ssh default \
@@ -312,11 +324,26 @@ package.json, which causes npm ci failures in Docker." 2>&1 | sed 's/^/  /'
       --label "build.time=${BUILD_TIME}" \
       -t "$TAG_LATEST" \
       -t "$TAG_SHA" \
-      . 2>&1 | tail -${BUILD_TAIL_LINES} | sed 's/^/  /')
+      . > "$temp_log" 2>&1
     BUILD_EXIT=$?
     set -e
-    
 
+    # Stop the background progress ticker
+    kill "$ticker_pid" 2>/dev/null || true
+    wait "$ticker_pid" 2>/dev/null || true
+
+    # If the build failed, dump the tail of the temp log to stdout for quick terminal debugging
+    if [ "$BUILD_EXIT" -ne 0 ]; then
+      echo "  [ERROR] Build output (last ${BUILD_TAIL_LINES} lines):"
+      tail -n "${BUILD_TAIL_LINES}" "$temp_log" | sed 's/^/  /'
+    fi
+
+    # Append the full build log to the caller's log file (dynamic scoped $log_file from deploy-all.sh)
+    if [ -n "${log_file:-}" ]; then
+      cat "$temp_log" >> "$log_file"
+    fi
+    
+    rm -f "$temp_log"
 
     if [ "$BUILD_EXIT" -ne 0 ]; then
       if [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 137 ]; then

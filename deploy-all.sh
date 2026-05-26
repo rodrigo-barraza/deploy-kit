@@ -429,10 +429,15 @@ has_changes() {
         return 0
       fi
 
-      # Also check if the library directory itself has dirty uncommitted changes
+      # Also check if the library directory itself has dirty uncommitted changes or unpushed commits
       if ! (cd "$dep_dir" && git diff --quiet HEAD -- . 2>/dev/null) || \
          [ -n "$(cd "$dep_dir" && git ls-files --others --exclude-standard . 2>/dev/null)" ]; then
         # Library has local uncommitted changes!
+        return 0
+      fi
+      if (cd "$dep_dir" && git rev-parse --abbrev-ref @{u} &>/dev/null) && \
+         [ "$(cd "$dep_dir" && git rev-list --count @{u}..HEAD 2>/dev/null || echo 0)" -gt 0 ]; then
+        # Library has local unpushed commits!
         return 0
       fi
     done
@@ -1205,16 +1210,19 @@ if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN && ! $SKIP_DEPS; then
       fi
     fi
 
-    # Check for local uncommitted changes
-    _has_uncommitted=false
+    # Check for local uncommitted changes OR unpushed commits
+    _has_changes=false
     if ! (cd "$lib_dir" && git diff --quiet HEAD -- . 2>/dev/null) || \
        [ -n "$(cd "$lib_dir" && git ls-files --others --exclude-standard . 2>/dev/null)" ]; then
-      _has_uncommitted=true
+      _has_changes=true
+    elif (cd "$lib_dir" && git rev-parse --abbrev-ref @{u} &>/dev/null) && \
+         [ "$(cd "$lib_dir" && git rev-list --count @{u}..HEAD 2>/dev/null || echo 0)" -gt 0 ]; then
+      _has_changes=true
     fi
 
     # Skip build if nothing changed and dist exists
     _needs_build=true
-    if [ "${PULLED_CHANGES[$lib_id]:-false}" = "false" ] && ! $_has_uncommitted && [ -d "${lib_dir}/dist" ]; then
+    if [ "${PULLED_CHANGES[$lib_id]:-false}" = "false" ] && ! $_has_changes && [ -d "${lib_dir}/dist" ]; then
       _needs_build=false
     fi
 

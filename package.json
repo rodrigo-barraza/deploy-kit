@@ -29,6 +29,8 @@
     "deploy:games-service": "bash ../games-service/deploy.sh",
     "deploy:gauge-client": "bash ../gauge-client/deploy.sh",
     "deploy:gauge-service": "bash ../gauge-service/deploy.sh",
+    "deploy:images-client": "bash ../images-client/deploy.sh",
+    "deploy:images-service": "bash ../images-service/deploy.sh",
     "deploy:iron-client": "bash ../iron-client/deploy.sh",
     "deploy:iron-service": "bash ../iron-service/deploy.sh",
     "deploy:ledger-client": "bash ../ledger-client/deploy.sh",

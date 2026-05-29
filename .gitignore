@@ -1,3 +1,6 @@
+# Node.js dependencies
+node_modules/
+
 # Deploy logs
 .deploy-logs/
 
@@ -9,3 +12,4 @@
 
 # Test fixtures (separate repo checkouts)
 test-components-lib/
+

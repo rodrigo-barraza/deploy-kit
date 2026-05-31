@@ -64,13 +64,20 @@ cleanup() {
 
     # Play completion sound if not in a dry-run
     if [ "${DRY_RUN:-false}" = "false" ]; then
-      if [ "$exit_code" -eq 0 ]; then
+      local has_unhealthy=false
+      if ls "${LOG_DIR:-.deploy-logs}"/*.health.status >/dev/null 2>&1; then
+        if grep -q "UNHEALTHY" "${LOG_DIR:-.deploy-logs}"/*.health.status 2>/dev/null; then
+          has_unhealthy=true
+        fi
+      fi
+
+      if [ "$exit_code" -eq 0 ] && [ "$has_unhealthy" = "false" ]; then
         # Succeeded: play Tada chime
         if command -v powershell.exe >/dev/null 2>&1; then
           powershell.exe -Command "(New-Object Media.SoundPlayer 'C:\Windows\Media\tada.wav').PlaySync()" >/dev/null 2>&1 || true
         fi
       else
-        # Failed: play Uh-Oh sound if available, otherwise Chord warning
+        # Failed or Unhealthy: play Uh-Oh sound if available, otherwise Chord warning
         local sound_dir="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
         local uhoh_wav="${sound_dir}/uhoh.wav"
         if [ -f "$uhoh_wav" ] && command -v powershell.exe >/dev/null 2>&1; then
@@ -998,6 +1005,7 @@ wait_tier_healthy() {
     # Remove healthy services from the pending set
     for svc in "${newly_healthy[@]}"; do
       ok "${svc} healthy (${SVC_HEALTH_URL[$svc]})"
+      echo "OK" > "${LOG_DIR}/${svc}.health.status"
       unset "pending[$svc]"
     done
 
@@ -1013,6 +1021,7 @@ wait_tier_healthy() {
   # Report any services that never became healthy
   for svc in "${!pending[@]}"; do
     warn "${svc} not healthy after ${HEALTH_GATE_TIMEOUT}s — proceeding anyway"
+    echo "UNHEALTHY" > "${LOG_DIR}/${svc}.health.status"
     all_healthy=false
   done
 
@@ -1524,12 +1533,21 @@ printf '%s%s══════════════════════�
 PASS=0
 FAILED=0
 SKIPPED=0
+UNHEALTHY_COUNT=0
 
 for svc in "${ALL_SERVICES[@]}"; do
   local_status=$(cat "${LOG_DIR}/${svc}.deploy.status" 2>/dev/null || echo "SKIP")
   svc_clr="${SVC_COLORS[$svc]:-$DIM}"
   case "$local_status" in
-    OK)   printf '  %s✔ %s%s\n' "$svc_clr" "$svc" "$RESET"; PASS=$((PASS + 1)) ;;
+    OK)
+      if [ "$(cat "${LOG_DIR}/${svc}.health.status" 2>/dev/null)" = "UNHEALTHY" ]; then
+        printf '  %s⚠ %s (unhealthy)%s\n' "$YELLOW" "$svc" "$RESET"
+        UNHEALTHY_COUNT=$((UNHEALTHY_COUNT + 1))
+      else
+        printf '  %s✔ %s%s\n' "$svc_clr" "$svc" "$RESET"
+        PASS=$((PASS + 1))
+      fi
+      ;;
     FAIL)
       # Show correct log based on what actually failed
       if [ -f "${LOG_DIR}/${svc}.deploy.log" ]; then
@@ -1548,9 +1566,19 @@ for svc in "${ALL_SERVICES[@]}"; do
 done
 
 echo ""
-printf '  %s%s passed%s  %s%s failed%s  %s%s skipped%s\n' "$GREEN" "$PASS" "$RESET" "$RED" "$FAILED" "$RESET" "$DIM" "$SKIPPED" "$RESET"
+summary_msg=""
+if [ "$UNHEALTHY_COUNT" -gt 0 ]; then
+  summary_msg="${GREEN}${PASS} passed${RESET}  ${YELLOW}${UNHEALTHY_COUNT} unhealthy${RESET}  ${RED}${FAILED} failed${RESET}  ${DIM}${SKIPPED} skipped${RESET}"
+else
+  summary_msg="${GREEN}${PASS} passed${RESET}  ${RED}${FAILED} failed${RESET}  ${DIM}${SKIPPED} skipped${RESET}"
+fi
+printf '  %b\n' "$summary_msg"
 printf '  %sTotal: %ss%s\n' "$DIM" "$TOTAL" "$RESET"
 echo ""
+if [ "$UNHEALTHY_COUNT" -gt 0 ]; then
+  printf '  %s%s⚠  WARNING: Some services were deployed successfully but failed their health checks!%s\n' "$YELLOW" "$BOLD" "$RESET"
+  echo ""
+fi
 printf '%s%s══════════════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
 
 # Non-zero exit if anything failed

@@ -1489,10 +1489,12 @@ if ! $DRY_RUN; then
   if $COMPACT_WSL; then
     step "Compacting WSL2 virtual disk (VHDX)"
     # Find the Docker Desktop VHDX path
-    VHDX_PATH=$(wslpath -w "$(find /mnt/c/Users/*/AppData/Local/Docker/wsl/disk -name 'docker_data.vhdx' 2>/dev/null | head -1)" 2>/dev/null || true)
+    _raw_vhdx_path=$(find /mnt/c/Users/*/AppData/Local/Docker/wsl/disk -name 'docker_data.vhdx' 2>/dev/null | head -1)
+    VHDX_PATH=$(wslpath -w "$_raw_vhdx_path" 2>/dev/null || true)
     if [ -z "$VHDX_PATH" ]; then
       # Fallback: try the standard docker-desktop-data distro path
-      VHDX_PATH=$(powershell.exe -Command "(Get-ChildItem -Path \$env:LOCALAPPDATA\\Docker\\wsl\\disk -Filter 'docker_data.vhdx' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName" 2>/dev/null | tr -d '\r' || true)
+      _ps_command="Get-ChildItem -Path \$env:LOCALAPPDATA\\Docker\\wsl\\disk -Filter 'docker_data.vhdx' -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1"
+      VHDX_PATH=$(powershell.exe -Command "$_ps_command" 2>/dev/null | tr -d '\r' || true)
     fi
     if [ -n "$VHDX_PATH" ]; then
       info "VHDX: ${VHDX_PATH}"

@@ -676,12 +676,18 @@ fire_transfers() {
     should_deploy "$svc" || continue
 
     (
-      # Poll for build completion (status file appears when done)
+      if [ -f "${LOG_DIR}/${svc}.build.pid" ]; then
+        local build_process_pid
+        build_process_pid=$(cat "${LOG_DIR}/${svc}.build.pid")
+        while kill -0 "$build_process_pid" 2>/dev/null; do
+          sleep 1
+        done
+      fi
+
       while [ ! -f "${LOG_DIR}/${svc}.build.status" ]; do
         sleep 1
       done
 
-      # Only transfer if build succeeded
       local build_status
       build_status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "UNKNOWN")
       if [ "$build_status" != "OK" ]; then

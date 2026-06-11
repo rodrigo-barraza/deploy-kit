@@ -240,7 +240,7 @@ done
 # ── TEMPORARY SKIP LIST (remove when these projects are ready) ─
 # These projects are temporarily excluded from full deploys.
 # To deploy them individually, use: npm run deploy -- --only=<service-id>
-TEMPORARY_SKIP="qbittorent-service,workspace-service,accounts-service,accounts-client,animals-service,animals-client,clankerbox-service,clankerbox-client,clock-crew-service,clock-crew-client,classic-whitemane-client,dygest-service,dygest-client,games-service,games-client,gauge-service,gauge-client,images-service,images-client,iron-service,iron-client,ledger-service,ledger-client,lights-service,lights-client,lupos-client,meepothegeomancer-client,messages-service,messages-client,music-service,music-client,notes-service,notes-client,reels-service,reels-client"
+TEMPORARY_SKIP="qbittorent-service,workspace-service,accounts-service,accounts-client,animals-service,animals-client,clankerbox-service,clankerbox-client,clock-crew-service,clock-crew-client,classic-whitemane-client,dygest-service,dygest-client,games-service,games-client,gauge-service,gauge-client,images-service,images-client,iron-service,iron-client,ledger-service,ledger-client,lights-client,lupos-client,meepothegeomancer-client,messages-service,messages-client,music-service,music-client,notes-service,notes-client,reels-service,reels-client"
 if [ -n "$SKIP_LIST" ]; then
   SKIP_LIST="${SKIP_LIST},${TEMPORARY_SKIP}"
 else

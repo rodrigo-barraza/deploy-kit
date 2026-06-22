@@ -13,3 +13,6 @@ node_modules/
 # Test fixtures (separate repo checkouts)
 test-components-lib/
 
+
+# Migrated to pnpm
+package-lock.json

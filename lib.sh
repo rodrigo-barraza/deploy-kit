@@ -53,7 +53,7 @@ SKIP_ENV_DEPLOY="${SKIP_ENV_DEPLOY:-false}"
 
 # ── SSH agent (for --ssh default in docker build) ─────────────
 # BuildKit forwards the host SSH agent into RUN --mount=type=ssh
-# layers so npm/git can authenticate to private GitHub repos.
+# layers so pnpm/git can authenticate to private GitHub repos.
 if [ -z "${SSH_AUTH_SOCK:-}" ]; then
   eval "$(ssh-agent -s)" > /dev/null 2>&1
   _STARTED_SSH_AGENT=true
@@ -193,14 +193,14 @@ if ! $DEPLOY_ONLY; then
   fi
 
   # ── 1.5 Lockfile sync ──────────────────────────────────────
-  # Ensure package-lock.json and node_modules are in sync with
-  # package.json. Git-based dependencies (git+https://...) are
-  # pinned by SHA in the lockfile — `npm install` alone won't
-  # re-resolve them. We first run `npm update` on any git deps
+  # Ensure pnpm-lock.yaml and node_modules are in sync with
+  # package.json. Git-based dependencies (github:...) are
+  # pinned by SHA in the lockfile — `pnpm install` alone won't
+  # re-resolve them. We first run `pnpm update` on any git deps
   # to pull the latest commit, then a full install to reconcile.
   # If the lockfile changed, auto-commit it so drift doesn't
   # recur on the next deploy.
-  if [ -f "package-lock.json" ] && ! $DRY_RUN; then
+  if [ -f "pnpm-lock.yaml" ] && ! $DRY_RUN; then
     needs_sync=false
 
     if [ ! -d "node_modules" ]; then
@@ -209,9 +209,9 @@ if ! $DEPLOY_ONLY; then
     else
       last_built_sha=$(docker inspect --format '{{index .Config.Labels "git.sha"}}' "${IMAGE_NAME}:latest" 2>/dev/null || echo "")
       if [ -n "$last_built_sha" ]; then
-        if ! git diff --quiet "$last_built_sha" HEAD -- package.json package-lock.json 2>/dev/null; then
+        if ! git diff --quiet "$last_built_sha" HEAD -- package.json pnpm-lock.yaml 2>/dev/null; then
           needs_sync=true
-          info "package.json or package-lock.json modified since last build — syncing..."
+          info "package.json or pnpm-lock.yaml modified since last build — syncing..."
         fi
       else
         needs_sync=true
@@ -244,21 +244,26 @@ if ! $DEPLOY_ONLY; then
       " 2>/dev/null || true)
       if [ -n "$GIT_DEPS" ]; then
         info "Updating git deps: ${GIT_DEPS}"
-        npm update $GIT_DEPS 2>&1 | tail -3 | sed 's/^/  /'
+        pnpm update $GIT_DEPS 2>&1 | tail -3 | sed 's/^/  /'
       fi
 
-      npm install --ignore-scripts 2>&1 | tail -3 | sed 's/^/  /'
+      pnpm install --ignore-scripts 2>&1 | tail -3 | sed 's/^/  /'
+
+      # Auto-approve any git-hosted deps whose commit SHAs changed.
+      # pnpm 11 requires explicit allowBuilds entries with full URLs
+      # for git deps — approve-builds --all handles this automatically.
+      pnpm approve-builds --all 2>/dev/null || true
 
       # No URL rewriting needed — Docker build uses --ssh default
       # to forward the host SSH agent for private git deps.
 
-      if ! git diff --quiet package-lock.json 2>/dev/null; then
+      if ! git diff --quiet pnpm-lock.yaml pnpm-workspace.yaml 2>/dev/null; then
         step "Lockfile out of sync — auto-committing"
-        git add package-lock.json
-        git commit -m "chore: sync package-lock.json
+        git add pnpm-lock.yaml pnpm-workspace.yaml
+        git commit -m "chore: sync pnpm-lock.yaml
 
-Auto-committed by deploy-kit — lockfile was out of sync with
-package.json, which causes npm ci failures in Docker." 2>&1 | sed 's/^/  /'
+Auto-committed by deploy-kit — lockfile or allowBuilds was out of
+sync with package.json, which causes pnpm install failures in Docker." 2>&1 | sed 's/^/  /'
         git push 2>&1 | sed 's/^/  /' || warn "Auto-push failed — lockfile committed locally only"
         # Re-capture SHA after the auto-commit
         GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -278,7 +283,7 @@ package.json, which causes npm ci failures in Docker." 2>&1 | sed 's/^/  /'
       info "(skipped — dry run)"
     else
       TEST_START=$SECONDS
-      if ! (set -o pipefail; export CI=true; npm run test --prefix "${SCRIPT_DIR}" 2>&1 | sed 's/^/  /'); then
+      if ! (set -o pipefail; export CI=true; pnpm run test 2>&1 | sed 's/^/  /'); then
         fail "Tests failed! Aborting deployment."
       fi
       ok "Tests passed in $((SECONDS - TEST_START))s"

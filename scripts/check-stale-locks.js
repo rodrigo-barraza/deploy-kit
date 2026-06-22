@@ -2,54 +2,69 @@ const fs = require('fs');
 const path = require('path');
 
 try {
-  if (!fs.existsSync('package.json') || !fs.existsSync('package-lock.json')) {
+  if (!fs.existsSync('package.json') || !fs.existsSync('pnpm-lock.yaml')) {
     process.exit(0);
   }
 
-  const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-  const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
-  const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
-  const customDeps = Object.keys(allDeps).filter(dep => dep.startsWith('@rodrigo-barraza/'));
+  const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+  const lockfileContent = fs.readFileSync('pnpm-lock.yaml', 'utf8');
+  const allDependencies = { ...packageJson.dependencies, ...packageJson.devDependencies };
+  const customDependencies = Object.keys(allDependencies).filter(dependency => dependency.startsWith('@rodrigo-barraza/'));
   
   const staleLibraries = [];
-  for (const dependencyName of customDeps) {
+  for (const dependencyName of customDependencies) {
     const libraryName = dependencyName.replace('@rodrigo-barraza/', '');
-    const libraryDir = path.resolve('..', libraryName);
-    if (!fs.existsSync(libraryDir)) {
+    const libraryDirectory = path.resolve('..', libraryName);
+    if (!fs.existsSync(libraryDirectory)) {
       continue;
     }
     
+    // Find the locked commit SHA within the dependency's block in pnpm-lock.yaml
     let lockedSha = '';
-    const lockKey = `node_modules/${dependencyName}`;
-    if (lock.packages && lock.packages[lockKey] && lock.packages[lockKey].resolved) {
-      const resolved = lock.packages[lockKey].resolved;
-      const hashIndex = resolved.indexOf('#');
-      if (hashIndex !== -1) {
-        lockedSha = resolved.substring(hashIndex + 1);
-      }
-    } else if (lock.dependencies && lock.dependencies[dependencyName] && lock.dependencies[dependencyName].version) {
-      const version = lock.dependencies[dependencyName].version;
-      const hashIndex = version.indexOf('#');
-      if (hashIndex !== -1) {
-        lockedSha = version.substring(hashIndex + 1);
+    const lines = lockfileContent.split('\n');
+    const escapedDependency = dependencyName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    const dependencyRegex = new RegExp(`^\\s*['"]?${escapedDependency}['"]?:`);
+    
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      if (dependencyRegex.test(line)) {
+        const baseIndentation = line.search(/\S/);
+        for (let nextIndex = index + 1; nextIndex < lines.length; nextIndex++) {
+          const nextLine = lines[nextIndex];
+          if (nextLine.trim() === '') {
+            continue;
+          }
+          const nextIndentation = nextLine.search(/\S/);
+          if (nextIndentation <= baseIndentation) {
+            break;
+          }
+          const commitShaMatch = nextLine.match(/(?:commit|tar\.gz\/|#)([0-9a-f]{40})/i);
+          if (commitShaMatch) {
+            lockedSha = commitShaMatch[1];
+            break;
+          }
+        }
+        if (lockedSha) {
+          break;
+        }
       }
     }
-    
+
     if (!lockedSha) {
       continue;
     }
     
     try {
       const execSync = require('child_process').execSync;
-      const currentSha = execSync('git rev-parse HEAD', { cwd: libraryDir }).toString().trim();
+      const currentSha = execSync('git rev-parse HEAD', { cwd: libraryDirectory }).toString().trim();
       if (currentSha && !lockedSha.startsWith(currentSha) && !currentSha.startsWith(lockedSha)) {
         staleLibraries.push(libraryName);
       }
-    } catch (err) {}
+    } catch (error) {}
   }
   if (staleLibraries.length > 0) {
     console.log(staleLibraries.join(' '));
   }
-} catch (e) {
+} catch (error) {
   process.exit(0);
 }

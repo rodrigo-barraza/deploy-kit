@@ -283,7 +283,11 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
       info "(skipped — dry run)"
     else
       TEST_START=$SECONDS
-      if ! (set -o pipefail; export CI=true; pnpm run test 2>&1 | sed 's/^/  /'); then
+      local extra_args=""
+      if grep -Eq '"test":.*(vitest|jest)' package.json 2>/dev/null; then
+        extra_args="-- --maxWorkers=2"
+      fi
+      if ! (set -o pipefail; export CI=true; pnpm run test $extra_args 2>&1 | sed 's/^/  /'); then
         fail "Tests failed! Aborting deployment."
       fi
       ok "Tests passed in $((SECONDS - TEST_START))s"

@@ -1,0 +1,199 @@
+Already up to date
+
+Done in 275ms using pnpm v11.8.0
+$ bash deploy-all.sh --changed-only --build-only
+
+[35m[1m══════════════════════════════════════════════════════════════[0m
+[35m[1m  🚀  Deploy All Services[0m
+  [2mThree-phase pipeline: build → transfer → restart[0m
+  [36mSkipping: qbittorent-service,accounts-service,accounts-client,animals-service,animals-client,clankerbox-service,clankerbox-client,clock-crew-service,clock-crew-client,classic-whitemane-client,dygest-service,dygest-client,games-service,games-client,gauge-service,gauge-client,images-service,images-client,iron-service,iron-client,ledger-service,ledger-client,lights-client,lupos-client,meepothegeomancer-client,messages-service,messages-client,music-service,music-client,notes-service,notes-client,reels-service,reels-client[0m
+  [36mMode: changed-only (skipping unchanged services)[0m
+[33m[1m  ⚠  BUILD ONLY — no transfer or restart will be performed[0m
+[35m[1m══════════════════════════════════════════════════════════════[0m
+
+[33m[1m┌──────────────────────────────────────────────────────────┐[0m
+[33m[1m│  PHASE 0 — LIBRARY SYNC                                 │[0m
+[33m[1m│  Pull latest shared libraries and check for changes      │[0m
+[33m[1m└──────────────────────────────────────────────────────────┘[0m
+
+[2m0000s 000% 21:08:50[0m [36m[1m▸ Pre-pulling libraries in parallel[0m
+
+[2m0001s 000% 21:08:51[0m [36m[1m▸ Syncing utilities-library[0m
+  Already up to date.
+[2m0001s 000% 21:08:51[0m   [32m✔ utilities-library: up to date (no changes)[0m
+
+[2m0001s 000% 21:08:51[0m [36m[1m▸ Syncing components-library[0m
+  Already up to date.
+[2m0001s 000% 21:08:51[0m   [32m✔ components-library: up to date (no changes)[0m
+
+[2m0001s 000% 21:08:51[0m [36m[1m▸ Syncing service-library[0m
+  Already up to date.
+[2m0001s 000% 21:08:51[0m   [32m✔ service-library: up to date (no changes)[0m
+
+[2m0001s 000% 21:08:51[0m [36m[1m▸ Pre-flight check[0m
+[2m0001s 000% 21:08:51[0m   [32m✔ lupos-bot/deploy.sh[0m
+[2m0001s 000% 21:08:51[0m   [32m✔ tools-service/deploy.sh[0m
+[2m0001s 000% 21:08:51[0m   [32m✔ portal-service/deploy.sh[0m
+[2m0001s 000% 21:08:51[0m   [32m✔ lights-service/deploy.sh[0m
+[2m0001s 000% 21:08:51[0m   [32m✔ prism-service/deploy.sh[0m
+[2m0001s 000% 21:08:51[0m   [32m✔ prism-client/deploy.sh[0m
+[2m0001s 000% 21:08:51[0m   [32m✔ portal-client/deploy.sh[0m
+[2m0001s 000% 21:08:51[0m   [32m✔ rod-dev-client/deploy.sh[0m
+[2m0001s 000% 21:08:51[0m   [32m✔ workspace-service/deploy.sh[0m
+[2m0001s 000% 21:08:51[0m   [32m✔ sessions-service/deploy.sh[0m
+[2m0001s 000% 21:08:51[0m   [32m✔ qbittorrent-service/deploy.sh[0m
+[2m0001s 000% 21:08:51[0m   [32m✔ vault-service/deploy.sh[0m
+
+[2m0001s 000% 21:08:51[0m [36m[1m▸ Pruning orphaned Docker networks on synology (nas)[0m
+[2m0001s 000% 21:08:51[0m   [32m✔ No orphaned networks[0m
+
+[36m[1m┌──────────────────────────────────────────────────────────┐[0m
+[36m[1m│  PHASE 1 — BUILD                                        │[0m
+[36m[1m│  All services build in parallel across all tiers         │[0m
+[36m[1m└──────────────────────────────────────────────────────────┘[0m
+[2m0001s 000% 21:08:51[0m   [2mSkipping vault-service (unchanged since last build)[0m
+[2m0001s 002% 21:08:51[0m   [2mNo services to build in Tier 0 — Foundation[0m
+[2m0001s 002% 21:08:51[0m   [2mSkipping tools-service (unchanged since last build)[0m
+[2m0001s 004% 21:08:51[0m   [2mSkipping portal-service (unchanged since last build)[0m
+[2m0001s 006% 21:08:51[0m   [2mSkipping lights-service (unchanged since last build)[0m
+[2m0001s 009% 21:08:51[0m   [2mSkipping clock-crew-service (filtered)[0m
+[2m0001s 011% 21:08:51[0m   [2mSkipping prism-service (unchanged since last build)[0m
+[2m0001s 013% 21:08:51[0m   [2mSkipping prism-client (unchanged since last build)[0m
+[2m0002s 015% 21:08:52[0m   [2mSkipping portal-client (unchanged since last build)[0m
+[2m0002s 018% 21:08:52[0m   [2mSkipping clock-crew-client (filtered)[0m
+[2m0002s 020% 21:08:52[0m   [2mSkipping lights-client (filtered)[0m
+[2m0002s 022% 21:08:52[0m   [2mSkipping rod-dev-client (unchanged since last build)[0m
+[2m0002s 025% 21:08:52[0m   [2mSkipping meepothegeomancer-client (filtered)[0m
+[2m0002s 027% 21:08:52[0m   [2mSkipping classic-whitemane-client (filtered)[0m
+[2m0002s 029% 21:08:52[0m   [2mSkipping messages-service (filtered)[0m
+[2m0002s 031% 21:08:52[0m   [2mSkipping messages-client (filtered)[0m
+[2m0002s 034% 21:08:52[0m   [2mSkipping ledger-service (filtered)[0m
+[2m0002s 036% 21:08:52[0m   [2mSkipping ledger-client (filtered)[0m
+[2m0002s 038% 21:08:52[0m   [2mSkipping workspace-service (unchanged since last build)[0m
+[2m0002s 040% 21:08:52[0m   [2mSkipping dygest-service (filtered)[0m
+[2m0002s 043% 21:08:52[0m   [2mSkipping dygest-client (filtered)[0m
+[2m0002s 045% 21:08:52[0m   [2mSkipping gauge-service (filtered)[0m
+[2m0002s 047% 21:08:52[0m   [2mSkipping gauge-client (filtered)[0m
+[2m0002s 050% 21:08:52[0m   [2mSkipping reels-service (filtered)[0m
+[2m0002s 052% 21:08:52[0m   [2mSkipping reels-client (filtered)[0m
+[2m0002s 054% 21:08:52[0m   [2mSkipping clankerbox-service (filtered)[0m
+[2m0002s 056% 21:08:52[0m   [2mSkipping clankerbox-client (filtered)[0m
+[2m0002s 059% 21:08:52[0m   [2mSkipping iron-service (filtered)[0m
+[2m0002s 061% 21:08:52[0m   [2mSkipping iron-client (filtered)[0m
+[2m0002s 063% 21:08:52[0m   [2mSkipping games-service (filtered)[0m
+[2m0002s 065% 21:08:52[0m   [2mSkipping games-client (filtered)[0m
+[2m0002s 068% 21:08:52[0m   [2mSkipping qbittorrent-service (unchanged since last build)[0m
+[2m0002s 070% 21:08:52[0m   [2mSkipping lupos-client (filtered)[0m
+[2m0002s 072% 21:08:52[0m   [2mSkipping notes-service (filtered)[0m
+[2m0002s 075% 21:08:52[0m   [2mSkipping notes-client (filtered)[0m
+[2m0002s 077% 21:08:52[0m   [2mSkipping images-service (filtered)[0m
+[2m0002s 079% 21:08:52[0m   [2mSkipping images-client (filtered)[0m
+[2m0002s 081% 21:08:52[0m   [2mSkipping music-service (filtered)[0m
+[2m0002s 084% 21:08:52[0m   [2mSkipping music-client (filtered)[0m
+[2m0002s 086% 21:08:52[0m   [2mSkipping accounts-service (filtered)[0m
+[2m0002s 088% 21:08:52[0m   [2mSkipping accounts-client (filtered)[0m
+[2m0002s 090% 21:08:52[0m   [2mSkipping animals-service (filtered)[0m
+[2m0002s 093% 21:08:52[0m   [2mSkipping animals-client (filtered)[0m
+
+[2m0002s 095% 21:08:52[0m [36m[1m▸ Launching builds — Tier 1 — Services & Clients: sessions-service[0m
+[2m0002s 095% 21:08:52[0m   [2m  ⟶ sessions-service (PID 3218221)[0m
+[2m0002s 095% 21:08:52[0m [38;5;33m[1m[sessions-service    ][0m 
+[2m0002s 095% 21:08:52[0m [38;5;33m[1m[sessions-service    ][0m [36m[1m══════════════════════════════════════════════════════[0m
+[2m0002s 095% 21:08:52[0m [38;5;33m[1m[sessions-service    ][0m [36m[1m  📊 Sessions Service — Build[0m
+[2m0002s 095% 21:08:52[0m [38;5;33m[1m[sessions-service    ][0m [36m[1m══════════════════════════════════════════════════════[0m
+[2m0002s 095% 21:08:52[0m [38;5;33m[1m[sessions-service    ][0m 
+[2m0002s 095% 21:08:52[0m [38;5;33m[1m[sessions-service    ][0m [2m21:08:52[0m [36m[1m▸ Validating deployment files[0m
+[2m0002s 095% 21:08:52[0m [38;5;33m[1m[sessions-service    ][0m [2m21:08:52[0m   [32m✔ .env.deploy found (17 lines)[0m
+[2m0002s 095% 21:08:52[0m [38;5;33m[1m[sessions-service    ][0m [2m21:08:52[0m   [2mBranch: master @ 599d6f0[0m
+[2m0002s 095% 21:08:52[0m [38;5;33m[1m[sessions-service    ][0m [2m21:08:52[0m   [2mTime:   2026-06-23T04:08:52Z[0m
+[2m0002s 095% 21:08:52[0m [38;5;33m[1m[sessions-service    ][0m 
+[2m0002s 095% 21:08:52[0m [38;5;33m[1m[sessions-service    ][0m [2m21:08:52[0m [36m[1m▸ Pulling latest changes[0m
+[2m0002s 095% 21:08:52[0m   [2mSkipping lupos-bot (unchanged since last build)[0m
+[2m0002s 097% 21:08:52[0m   [2mNo services to build in Tier 2 — Bots[0m
+
+[2m0002s 097% 21:08:52[0m   [2mBuild-only mode — waiting for all builds to complete...[0m
+
+[2m0002s 097% 21:08:52[0m [36m[1m▸ Waiting for Tier 1 — Services & Clients builds to finish[0m
+[2m0003s 097% 21:08:53[0m [38;5;33m[1m[sessions-service    ][0m   Already up to date.
+[2m0003s 097% 21:08:53[0m [38;5;33m[1m[sessions-service    ][0m [2m21:08:53[0m   [32m✔ Now at 599d6f0[0m
+[2m0003s 097% 21:08:53[0m [38;5;33m[1m[sessions-service    ][0m [2m21:08:53[0m   [2mDependencies up to date (skipped host sync)[0m
+[2m0003s 097% 21:08:53[0m [38;5;33m[1m[sessions-service    ][0m 
+[2m0003s 097% 21:08:53[0m [38;5;33m[1m[sessions-service    ][0m [2m21:08:53[0m [36m[1m▸ Running Tests[0m
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m   $ vitest run --passWithNoTests
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m   
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m   [1m[30m[46m RUN [49m[39m[22m [36mv4.1.9 [39m[90m/home/rodrigo/development/sessions-service[39m
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m   
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m    [32m✓[39m tests/health.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 14[2mms[22m[39m
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m   
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m   [2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m   [2m      Tests [22m [1m[32m7 passed[39m[22m[90m (7)[39m
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m   [2m   Start at [22m 21:08:54
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m   [2m   Duration [22m 144ms[2m (transform 28ms, setup 0ms, import 37ms, tests 14ms, environment 0ms)[22m
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m   
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m [2m21:08:54[0m   [32m✔ Tests passed in 1s[0m
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m 
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m [2m21:08:54[0m [36m[1m▸ Building Docker image[0m
+[2m0004s 097% 21:08:54[0m [38;5;33m[1m[sessions-service    ][0m [2m21:08:54[0m   [2mTags: sessions-service:latest, sessions-service:599d6f0[0m
+[2m0005s 097% 21:08:55[0m [38;5;33m[1m[sessions-service    ][0m [2m21:08:55[0m   [32m✔ Built in 1s[0m
+[2m0005s 097% 21:08:55[0m [38;5;33m[1m[sessions-service    ][0m Untagged: sessions-service:599d6f0
+[2m0005s 097% 21:08:55[0m [38;5;33m[1m[sessions-service    ][0m [2m21:08:55[0m   [2mRemoved local tag sessions-service:599d6f0[0m
+[2m0005s 097% 21:08:55[0m [38;5;33m[1m[sessions-service    ][0m 
+[2m0005s 097% 21:08:55[0m [38;5;33m[1m[sessions-service    ][0m [32m[1m══════════════════════════════════════════════════════[0m
+[2m0005s 097% 21:08:55[0m [38;5;33m[1m[sessions-service    ][0m [32m[1m  ✅ Build complete in 3s[0m
+[2m0005s 097% 21:08:55[0m [38;5;33m[1m[sessions-service    ][0m   [2mmaster@599d6f0 (2026-06-23T04:08:55Z)[0m
+[2m0005s 097% 21:08:55[0m [38;5;33m[1m[sessions-service    ][0m [32m[1m══════════════════════════════════════════════════════[0m
+[2m0005s 097% 21:08:55[0m [38;5;33m[1m[sessions-service    ][0m 
+[2m0014s 100% 21:09:04[0m   [32m✔ sessions-service built successfully[0m
+
+[35m[1m══════════════════════════════════════════════════════════════[0m
+[35m[1m  🔨  Build Only — Summary[0m
+[35m[1m══════════════════════════════════════════════════════════════[0m
+  [2m⊘ lupos-bot (skipped)[0m
+  [2m⊘ tools-service (skipped)[0m
+  [2m⊘ portal-service (skipped)[0m
+  [2m⊘ lights-service (skipped)[0m
+  [2m⊘ clock-crew-service (skipped)[0m
+  [2m⊘ prism-service (skipped)[0m
+  [2m⊘ prism-client (skipped)[0m
+  [2m⊘ portal-client (skipped)[0m
+  [2m⊘ clock-crew-client (skipped)[0m
+  [2m⊘ lights-client (skipped)[0m
+  [2m⊘ rod-dev-client (skipped)[0m
+  [2m⊘ meepothegeomancer-client (skipped)[0m
+  [2m⊘ classic-whitemane-client (skipped)[0m
+  [2m⊘ messages-service (skipped)[0m
+  [2m⊘ messages-client (skipped)[0m
+  [2m⊘ ledger-service (skipped)[0m
+  [2m⊘ ledger-client (skipped)[0m
+  [2m⊘ workspace-service (skipped)[0m
+  [38;5;33m✔ sessions-service[0m
+  [2m⊘ dygest-service (skipped)[0m
+  [2m⊘ dygest-client (skipped)[0m
+  [2m⊘ gauge-service (skipped)[0m
+  [2m⊘ gauge-client (skipped)[0m
+  [2m⊘ reels-service (skipped)[0m
+  [2m⊘ reels-client (skipped)[0m
+  [2m⊘ clankerbox-service (skipped)[0m
+  [2m⊘ clankerbox-client (skipped)[0m
+  [2m⊘ iron-service (skipped)[0m
+  [2m⊘ iron-client (skipped)[0m
+  [2m⊘ games-service (skipped)[0m
+  [2m⊘ games-client (skipped)[0m
+  [2m⊘ qbittorrent-service (skipped)[0m
+  [2m⊘ lupos-client (skipped)[0m
+  [2m⊘ notes-service (skipped)[0m
+  [2m⊘ notes-client (skipped)[0m
+  [2m⊘ images-service (skipped)[0m
+  [2m⊘ images-client (skipped)[0m
+  [2m⊘ music-service (skipped)[0m
+  [2m⊘ music-client (skipped)[0m
+  [2m⊘ accounts-service (skipped)[0m
+  [2m⊘ accounts-client (skipped)[0m
+  [2m⊘ animals-service (skipped)[0m
+  [2m⊘ animals-client (skipped)[0m
+  [2m⊘ vault-service (skipped)[0m
+
+  [32m1 passed[0m  [31m0 failed[0m  [2m43 skipped[0m
+  [2mTotal: 14s[0m
+
+[35m[1m══════════════════════════════════════════════════════════════[0m

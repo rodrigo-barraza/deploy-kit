@@ -283,7 +283,7 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
       info "(skipped — dry run)"
     else
       TEST_START=$SECONDS
-      local extra_args=""
+      extra_args=""
       if grep -Eq '"test":.*(vitest|jest)' package.json 2>/dev/null; then
         extra_args="-- --maxWorkers=2"
       fi

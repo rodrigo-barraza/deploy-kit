@@ -1321,6 +1321,7 @@ if $BUILD_ONLY; then
   echo ""
   printf '  %s%s passed%s  %s%s failed%s  %s%s skipped%s\n' "$GREEN" "$PASS" "$RESET" "$RED" "$FAILED" "$RESET" "$DIM" "$SKIPPED" "$RESET"
   printf '  %sTotal: %ss%s\n' "$DIM" "$TOTAL" "$RESET"
+  printf '  %s%s%s\n' "$DIM" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$RESET"
   echo ""
   printf '%s%s══════════════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
 
@@ -1580,6 +1581,7 @@ else
 fi
 printf '  %b\n' "$summary_msg"
 printf '  %sTotal: %ss%s\n' "$DIM" "$TOTAL" "$RESET"
+printf '  %s%s%s\n' "$DIM" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$RESET"
 echo ""
 if [ "$UNHEALTHY_COUNT" -gt 0 ]; then
   printf '  %s%s⚠  WARNING: Some services were deployed successfully but failed their health checks!%s\n' "$YELLOW" "$BOLD" "$RESET"

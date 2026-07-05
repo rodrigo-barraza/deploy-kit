@@ -54,6 +54,14 @@ SKIP_ENV_DEPLOY="${SKIP_ENV_DEPLOY:-false}"
 # ── SSH agent (for --ssh default in docker build) ─────────────
 # BuildKit forwards the host SSH agent into RUN --mount=type=ssh
 # layers so pnpm/git can authenticate to private GitHub repos.
+if [ -n "${SSH_AUTH_SOCK:-}" ]; then
+  ssh_status=0
+  ssh-add -l >/dev/null 2>&1 || ssh_status=$?
+  if [ $ssh_status -eq 2 ]; then
+    unset SSH_AUTH_SOCK
+  fi
+fi
+
 if [ -z "${SSH_AUTH_SOCK:-}" ]; then
   eval "$(ssh-agent -s)" > /dev/null 2>&1
   _STARTED_SSH_AGENT=true
@@ -285,7 +293,24 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
       TEST_START=$SECONDS
       extra_args=""
       if grep -Eq '"test":.*(vitest|jest)' package.json 2>/dev/null; then
-        extra_args="-- --maxWorkers=2"
+        # Dynamically calculate workers based on available cores and build concurrency
+        local total_cores
+        total_cores=$(nproc 2>/dev/null || echo 4)
+        local concurrent_builds="${MAX_CONCURRENT_BUILDS:-1}"
+        
+        # Scale workers: use at least 2
+        local calculated_workers=$(( total_cores / concurrent_builds ))
+        
+        # Cap workers to prevent system starvation
+        # If running in parallel, cap at 8 per service. If single service, cap at 16.
+        local worker_cap=8
+        [ "$concurrent_builds" -eq 1 ] && worker_cap=16
+        
+        [ "$calculated_workers" -lt 2 ] && calculated_workers=2
+        [ "$calculated_workers" -gt "$worker_cap" ] && calculated_workers=$worker_cap
+        
+        extra_args="-- --maxWorkers=${calculated_workers}"
+        info "Scaling tests to ${calculated_workers} workers (Cores: ${total_cores}, Concurrency: ${concurrent_builds})"
       fi
       if ! (set -o pipefail; export CI=true; pnpm run test $extra_args 2>&1 | sed 's/^/  /'); then
         fail "Tests failed! Aborting deployment."

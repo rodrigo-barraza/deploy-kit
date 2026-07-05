@@ -107,6 +107,14 @@ PROJECTS_JSON="${ROOT_DIR}/vault-service/projects.json"
 # ── SSH agent (for BuildKit --ssh default in docker build) ────
 # Child deploy.sh processes need SSH_AUTH_SOCK to forward the
 # agent into RUN --mount=type=ssh layers for private git deps.
+if [ -n "${SSH_AUTH_SOCK:-}" ]; then
+  ssh_status=0
+  ssh-add -l >/dev/null 2>&1 || ssh_status=$?
+  if [ $ssh_status -eq 2 ]; then
+    unset SSH_AUTH_SOCK
+  fi
+fi
+
 if [ -z "${SSH_AUTH_SOCK:-}" ]; then
   eval "$(ssh-agent -s)" > /dev/null 2>&1
   export SSH_AUTH_SOCK SSH_AGENT_PID
@@ -213,6 +221,7 @@ MAX_CONCURRENT_BUILDS=6   # Limit concurrent docker builds to prevent CPU/IO and
 if grep -qi microsoft /proc/version 2>/dev/null; then
   MAX_CONCURRENT_BUILDS=4
 fi
+export MAX_CONCURRENT_BUILDS
 MAX_CONCURRENT_SSH=8      # Subject to the target SSH server's MaxSessions limit (default: 10) even when multiplexed
 
 for arg in "$@"; do

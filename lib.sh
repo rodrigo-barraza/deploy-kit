@@ -294,23 +294,23 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
       extra_args=""
       if grep -Eq '"test":.*(vitest|jest)' package.json 2>/dev/null; then
         # Dynamically calculate workers based on available cores and build concurrency
-        local total_cores
-        total_cores=$(nproc 2>/dev/null || echo 4)
-        local concurrent_builds="${MAX_CONCURRENT_BUILDS:-1}"
+        _test_total_cores=$(nproc 2>/dev/null || echo 4)
+        _test_concurrent_builds="${MAX_CONCURRENT_BUILDS:-1}"
+        [ "$_test_concurrent_builds" -lt 1 ] 2>/dev/null && _test_concurrent_builds=1
         
-        # Scale workers: use at least 2
-        local calculated_workers=$(( total_cores / concurrent_builds ))
+        # Scale workers: cores / concurrent builds, clamped to [2, cap]
+        _test_calculated_workers=$(( _test_total_cores / _test_concurrent_builds ))
         
         # Cap workers to prevent system starvation
-        # If running in parallel, cap at 8 per service. If single service, cap at 16.
-        local worker_cap=8
-        [ "$concurrent_builds" -eq 1 ] && worker_cap=16
+        # Parallel mode: cap at 8 per service. Single service: cap at 16.
+        _test_worker_cap=8
+        [ "$_test_concurrent_builds" -eq 1 ] && _test_worker_cap=16
         
-        [ "$calculated_workers" -lt 2 ] && calculated_workers=2
-        [ "$calculated_workers" -gt "$worker_cap" ] && calculated_workers=$worker_cap
+        [ "$_test_calculated_workers" -lt 2 ] && _test_calculated_workers=2
+        [ "$_test_calculated_workers" -gt "$_test_worker_cap" ] && _test_calculated_workers=$_test_worker_cap
         
-        extra_args="-- --maxWorkers=${calculated_workers}"
-        info "Scaling tests to ${calculated_workers} workers (Cores: ${total_cores}, Concurrency: ${concurrent_builds})"
+        extra_args="-- --maxWorkers=${_test_calculated_workers}"
+        info "Scaling tests to ${_test_calculated_workers} workers (Cores: ${_test_total_cores}, Concurrency: ${_test_concurrent_builds})"
       fi
       if ! (set -o pipefail; export CI=true; pnpm run test $extra_args 2>&1 | sed 's/^/  /'); then
         fail "Tests failed! Aborting deployment."

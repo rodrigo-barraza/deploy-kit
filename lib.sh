@@ -439,7 +439,7 @@ verify_container() {
   HEALTH_OK=false
   for _h in $(seq 1 $HEALTH_MAX); do
     sleep $HEALTH_INTERVAL
-    CONTAINER_STATUS=$($check_cmd ps --filter "name=^${IMAGE_NAME}$" --format '{{.Status}}' 2>/dev/null || echo "")
+    CONTAINER_STATUS=$($check_cmd ps --filter "name=${IMAGE_NAME}$" --format '{{.Status}}' 2>/dev/null || echo "")
     if [ -z "$CONTAINER_STATUS" ]; then
       fail "Container '${IMAGE_NAME}' not found after restart — deploy failed"
     fi

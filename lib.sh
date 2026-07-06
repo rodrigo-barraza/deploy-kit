@@ -286,6 +286,11 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
 
   # ── 1.6 Run Tests ───────────────────────────────────────────
   if grep -q '"test":' package.json 2>/dev/null; then
+    # Call optional pre-test hook (e.g. to run a host build if tests depend on dist/)
+    if type PRE_TEST &>/dev/null; then
+      PRE_TEST
+    fi
+
     step "Running Tests"
     if $DRY_RUN; then
       info "(skipped — dry run)"

@@ -296,30 +296,89 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
       info "(skipped — dry run)"
     else
       TEST_START=$SECONDS
-      extra_args=""
+
       if grep -Eq '"test":.*(vitest|jest)' package.json 2>/dev/null; then
-        # Dynamically calculate workers based on available cores and build concurrency
+        # ── Resource calculation ──────────────────────────────
         _test_total_cores=$(nproc 2>/dev/null || echo 4)
         _test_concurrent_builds="${MAX_CONCURRENT_BUILDS:-1}"
         [ "$_test_concurrent_builds" -lt 1 ] 2>/dev/null && _test_concurrent_builds=1
-        
-        # Scale workers: cores / concurrent builds, clamped to [2, cap]
-        _test_calculated_workers=$(( _test_total_cores / _test_concurrent_builds ))
-        
-        # Cap workers to prevent system starvation
-        # Parallel mode: cap at 8 per service. Single service: cap at 16.
-        _test_worker_cap=8
-        [ "$_test_concurrent_builds" -eq 1 ] && _test_worker_cap=16
-        
-        [ "$_test_calculated_workers" -lt 2 ] && _test_calculated_workers=2
-        [ "$_test_calculated_workers" -gt "$_test_worker_cap" ] && _test_calculated_workers=$_test_worker_cap
-        
-        extra_args="-- --maxWorkers=${_test_calculated_workers}"
-        info "Scaling tests to ${_test_calculated_workers} workers (Cores: ${_test_total_cores}, Concurrency: ${_test_concurrent_builds})"
+
+        # Cores available to this service (share fairly across concurrent builds)
+        _test_available_cores=$(( _test_total_cores / _test_concurrent_builds ))
+        [ "$_test_available_cores" -lt 2 ] && _test_available_cores=2
+
+        # Count test files to decide if sharding is worthwhile
+        _test_file_count=$(find src tests -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.test.js' 2>/dev/null \
+          | grep -v node_modules | grep -v '/live/' | wc -l)
+
+        # ── Sharding: split into N parallel Vitest instances ──
+        # Sharding pays off when there are enough files to distribute
+        # and enough cores to run multiple instances without contention.
+        # Formula: shards = available_cores / 8, clamped to [1, 4]
+        # Each shard gets workers = available_cores / shards
+        _test_shard_count=1
+        if [ "$_test_file_count" -ge 40 ] && [ "$_test_available_cores" -ge 8 ]; then
+          _test_shard_count=$(( _test_available_cores / 8 ))
+          [ "$_test_shard_count" -lt 1 ] && _test_shard_count=1
+          [ "$_test_shard_count" -gt 4 ] && _test_shard_count=4
+        fi
+
+        _test_workers_per_shard=$(( _test_available_cores / _test_shard_count ))
+        [ "$_test_workers_per_shard" -lt 2 ] && _test_workers_per_shard=2
+
+        if [ "$_test_shard_count" -gt 1 ]; then
+          # ── Parallel sharded execution ────────────────────
+          info "Sharding ${_test_file_count} test files across ${_test_shard_count} shards × ${_test_workers_per_shard} workers (Cores: ${_test_total_cores}, Concurrency: ${_test_concurrent_builds})"
+
+          _shard_log_dir="${DEPLOY_LOG_DIR:-.deploy-logs}/shards"
+          mkdir -p "$_shard_log_dir"
+          _shard_pids=()
+          _shard_failed=0
+
+          for _shard_index in $(seq 1 "$_test_shard_count"); do
+            _shard_log="${_shard_log_dir}/${IMAGE_NAME:-tests}_shard${_shard_index}.log"
+            (
+              export CI=true
+              pnpm run test -- \
+                --reporter=dot \
+                --shard="${_shard_index}/${_test_shard_count}" \
+                --maxWorkers="${_test_workers_per_shard}" \
+                > "$_shard_log" 2>&1
+            ) &
+            _shard_pids+=($!)
+          done
+
+          # Wait for all shards and collect exit codes
+          for _pid_index in "${!_shard_pids[@]}"; do
+            if ! wait "${_shard_pids[$_pid_index]}"; then
+              _shard_failed=1
+              _failed_shard_index=$(( _pid_index + 1 ))
+              warn "Shard ${_failed_shard_index}/${_test_shard_count} failed"
+              _failed_log="${_shard_log_dir}/${IMAGE_NAME:-tests}_shard${_failed_shard_index}.log"
+              if [ -f "$_failed_log" ]; then
+                printf '%s\n' "  ── Shard ${_failed_shard_index} output ──"
+                sed 's/^/  /' "$_failed_log" | tail -40
+              fi
+            fi
+          done
+
+          if [ "$_shard_failed" -eq 1 ]; then
+            fail "Tests failed! Aborting deployment. (shard logs: ${_shard_log_dir}/)"
+          fi
+        else
+          # ── Single-process execution (small suites / few cores) ──
+          info "Running ${_test_file_count} test files with ${_test_workers_per_shard} workers (Cores: ${_test_total_cores}, Concurrency: ${_test_concurrent_builds})"
+          if ! (set -o pipefail; export CI=true; pnpm run test -- --maxWorkers="${_test_workers_per_shard}" 2>&1 | sed 's/^/  /'); then
+            fail "Tests failed! Aborting deployment."
+          fi
+        fi
+      else
+        # Non-vitest/jest runner — run as-is
+        if ! (set -o pipefail; export CI=true; pnpm run test 2>&1 | sed 's/^/  /'); then
+          fail "Tests failed! Aborting deployment."
+        fi
       fi
-      if ! (set -o pipefail; export CI=true; pnpm run test $extra_args 2>&1 | sed 's/^/  /'); then
-        fail "Tests failed! Aborting deployment."
-      fi
+
       ok "Tests passed in $((SECONDS - TEST_START))s"
     fi
   fi

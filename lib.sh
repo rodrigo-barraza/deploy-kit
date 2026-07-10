@@ -339,7 +339,7 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
             _shard_log="${_shard_log_dir}/${IMAGE_NAME:-tests}_shard${_shard_index}.log"
             (
               export CI=true
-              pnpm run test -- \
+              pnpm test \
                 --reporter=dot \
                 --shard="${_shard_index}/${_test_shard_count}" \
                 --maxWorkers="${_test_workers_per_shard}" \

@@ -52,8 +52,7 @@
     "deploy:rod-dev-client": "bash ../rod-dev-client/deploy.sh",
     "deploy:sessions-service": "bash ../sessions-service/deploy.sh",
     "deploy:tools-service": "bash ../tools-service/deploy.sh",
-    "deploy:vault-service": "bash ../vault-service/deploy.sh",
-    "deploy:workspace-service": "bash ../workspace-service/deploy.sh"
+    "deploy:vault-service": "bash ../vault-service/deploy.sh"
   },
   "packageManager": "pnpm@11.8.0"
 }

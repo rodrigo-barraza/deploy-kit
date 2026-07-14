@@ -63,8 +63,8 @@ cleanup() {
     rm -f "${LOG_DIR:-.deploy-logs}"/*.pid 2>/dev/null || true
 
 
-    # Play completion sound if not in a dry-run
-    if [ "${DRY_RUN:-false}" = "false" ]; then
+    # Play completion sound if not in a dry-run (and not user-cancelled)
+    if [ "${DRY_RUN:-false}" = "false" ] && [ "${INTERRUPTED:-false}" = "false" ]; then
       local has_unhealthy=false
       if ls "${LOG_DIR:-.deploy-logs}"/*.health.status >/dev/null 2>&1; then
         if grep -q "UNHEALTHY" "${LOG_DIR:-.deploy-logs}"/*.health.status 2>/dev/null; then
@@ -97,6 +97,23 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# ── Interrupt handling (Ctrl+C) ───────────────────────────────
+# Jobs launched with & in a non-interactive shell start with SIGINT
+# ignored (POSIX), so Ctrl+C kills only this main process and orphans
+# every build/transfer job — and their docker/pnpm children keep
+# running and printing to the terminal. SIGTERM is NOT ignored, so on
+# interrupt we TERM the entire process group to stop the pipeline.
+INTERRUPTED=false
+on_interrupt() {
+  trap '' INT TERM   # shield ourselves from the group-wide TERM below
+  INTERRUPTED=true
+  printf '\n  Interrupted — stopping all build/transfer jobs...\n' >&2
+  kill -TERM 0 2>/dev/null || true
+  wait 2>/dev/null || true
+  exit 130
+}
+trap on_interrupt INT TERM
 
 
 # ── Config ────────────────────────────────────────────────────

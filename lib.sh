@@ -387,6 +387,15 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
   TAG_LATEST="${IMAGE_NAME}:latest"
   TAG_SHA="${IMAGE_NAME}:${GIT_SHA}"
 
+  # Sync canonical client boot script (repos with a boot.js get the
+  # deploy-kit template copy so the 20+ clients can never drift)
+  if [ -f "${SCRIPT_DIR}/boot.js" ] && [ -f "${DEPLOY_KIT_DIR}/templates/client-boot.js" ]; then
+    if ! cmp -s "${DEPLOY_KIT_DIR}/templates/client-boot.js" "${SCRIPT_DIR}/boot.js"; then
+      cp "${DEPLOY_KIT_DIR}/templates/client-boot.js" "${SCRIPT_DIR}/boot.js"
+      info "boot.js synced from deploy-kit/templates/client-boot.js"
+    fi
+  fi
+
   # Call optional pre-build hook (sets BUILD_ARGS, etc.)
   if type PRE_BUILD &>/dev/null; then
     PRE_BUILD

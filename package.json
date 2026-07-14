@@ -7,6 +7,7 @@
     "deploy": "bash deploy-all.sh",
     "deploy:dry": "bash deploy-all.sh --dry-run",
     "deploy:changed": "bash deploy-all.sh --changed-only",
+    "deploy:changed-all": "bash deploy-all.sh --changed-all",
     "deploy:changed:no-deps": "bash deploy-all.sh --changed-only --skip-deps",
     "build": "bash deploy-all.sh --build-only",
     "build:changed": "bash deploy-all.sh --changed-only --build-only",

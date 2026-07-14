@@ -23,6 +23,8 @@
 #   npm run deploy -- --skip-pull          # skip git pull
 #   npm run deploy -- --no-cache           # rebuild images from scratch
 #   npm run deploy -- --changed-only       # only build+deploy services with git changes
+#   npm run deploy -- --changed-all        # changed services, ignoring the TEMPORARY_SKIP list
+#   npm run deploy -- --ignore-temp-skip   # disable the TEMPORARY_SKIP list for this run
 #   npm run deploy -- --skip-deps          # skip library build and dependency change checks
 #   npm run deploy -- --build-only         # build Docker images only (no transfer/restart)
 #   npm run deploy -- --only=prism-service,prism-client  # deploy specific services
@@ -224,6 +226,7 @@ DRY_RUN=false
 ANY_LIB_CHANGED=false
 export ANY_LIB_CHANGED
 SKIP_PULL=false
+IGNORE_TEMP_SKIP=false
 NO_CACHE=false
 NO_PARALLEL=false
 ONLY=""
@@ -248,6 +251,8 @@ for arg in "$@"; do
     --no-cache)       NO_CACHE=true ;;
     --no-parallel)    NO_PARALLEL=true ;;
     --changed-only)   CHANGED_ONLY=true ;;
+    --ignore-temp-skip) IGNORE_TEMP_SKIP=true ;;
+    --changed-all)    CHANGED_ONLY=true; IGNORE_TEMP_SKIP=true ;;
     --skip-deps)      SKIP_DEPS=true ;;
     --build-only)     BUILD_ONLY=true ;;
     --compact-wsl)    COMPACT_WSL=true ;;
@@ -266,11 +271,15 @@ done
 # ── TEMPORARY SKIP LIST (remove when these projects are ready) ─
 # These projects are temporarily excluded from full deploys.
 # To deploy them individually, use: npm run deploy -- --only=<service-id>
+# To deploy everything that changed regardless of this list, use:
+#   npm run deploy:changed-all   (or pass --ignore-temp-skip)
 TEMPORARY_SKIP="qbittorent-service,accounts-service,accounts-client,animals-service,animals-client,clankerbox-service,clankerbox-client,clock-crew-service,clock-crew-client,classic-whitemane-client,dygest-service,dygest-client,games-service,games-client,gauge-service,gauge-client,images-service,images-client,iron-service,iron-client,ledger-service,ledger-client,lights-client,lupos-client,meepothegeomancer-client,messages-service,messages-client,music-service,music-client,notes-service,notes-client,reels-service,reels-client"
-if [ -n "$SKIP_LIST" ]; then
-  SKIP_LIST="${SKIP_LIST},${TEMPORARY_SKIP}"
-else
-  SKIP_LIST="$TEMPORARY_SKIP"
+if [ "${IGNORE_TEMP_SKIP:-false}" != "true" ]; then
+  if [ -n "$SKIP_LIST" ]; then
+    SKIP_LIST="${SKIP_LIST},${TEMPORARY_SKIP}"
+  else
+    SKIP_LIST="$TEMPORARY_SKIP"
+  fi
 fi
 
 # ── Prefetch git.sha image labels (one docker call, not N) ────

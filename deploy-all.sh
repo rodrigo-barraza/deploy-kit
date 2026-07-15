@@ -26,6 +26,8 @@
 #   npm run deploy -- --changed-all        # changed services, ignoring the TEMPORARY_SKIP list
 #   npm run deploy -- --ignore-temp-skip   # disable the TEMPORARY_SKIP list for this run
 #   npm run deploy -- --skip-deps          # skip library build and dependency change checks
+#   npm run deploy -- --no-impact          # disable symbol-level library impact analysis
+#                                            (fall back to "any lib commit rebuilds all consumers")
 #   npm run deploy -- --build-only         # build Docker images only (no transfer/restart)
 #   npm run deploy -- --only=prism-service,prism-client  # deploy specific services
 #   npm run deploy -- --skip=lupos-bot,lights-service  # skip specific services
@@ -250,6 +252,7 @@ ONLY=""
 SKIP_LIST=""
 CHANGED_ONLY=false
 SKIP_DEPS=false
+NO_IMPACT=false
 BUILD_ONLY=false
 COMPACT_WSL=false
 GROUP=""
@@ -271,6 +274,7 @@ for arg in "$@"; do
     --ignore-temp-skip) IGNORE_TEMP_SKIP=true ;;
     --changed-all)    CHANGED_ONLY=true; IGNORE_TEMP_SKIP=true ;;
     --skip-deps)      SKIP_DEPS=true ;;
+    --no-impact)      NO_IMPACT=true ;;
     --build-only)     BUILD_ONLY=true ;;
     --compact-wsl)    COMPACT_WSL=true ;;
     --only=*)         ONLY="${arg#--only=}" ;;
@@ -457,6 +461,21 @@ has_changes() {
       done
     fi
 
+    # ── Symbol-level impact verdict (scripts/lib-impact.js) ────
+    # When the analysis ran successfully, its verdict replaces the
+    # coarse SHA comparison below: a library change only triggers a
+    # rebuild when this service actually imports an affected export
+    # (directly, or through components-library's use of utilities).
+    # All analysis uncertainty resolves to "affected" inside the
+    # script (fail-open); a script failure leaves IMPACT_SCRIPT_OK
+    # false so we fall through to the legacy whole-library check.
+    if [ "${IMPACT_SCRIPT_OK:-false}" = "true" ] && [ -n "${IMPACT_VERDICT[$svc]:-}" ]; then
+      if [ "${IMPACT_VERDICT[$svc]}" = "affected" ]; then
+        return 0
+      fi
+      return 1   # unaffected | none — no library-triggered rebuild
+    fi
+
     # Read the saved dependency SHAs
     declare -A saved_shas
     while IFS=': ' read -r dep_id dep_sha || [ -n "$dep_id" ]; do
@@ -466,6 +485,11 @@ has_changes() {
 
     for dep_id in ${SVC_LIB_DEPS[$svc]}; do
       local dep_dir="${ROOT_DIR}/${dep_id}"
+      # Stale or phantom dependency (e.g. the merged-away
+      # service-library): a missing directory yields no signal, but
+      # the cd-failure below would read as "dirty" and force a
+      # rebuild on every single run.
+      [ -d "$dep_dir" ] || continue
       local current_dep_sha
       current_dep_sha=$(cd "$dep_dir" && git rev-parse HEAD 2>/dev/null || echo "")
       local saved_dep_sha="${saved_shas[$dep_id]:-}"
@@ -564,7 +588,10 @@ run_phase() {
   # automatically (via lib.sh). Services using pre-built images
   # (e.g. qbittorrent-service) don't — so we persist the SHA to
   # a marker file for has_changes() to use on subsequent runs.
-  if { [ "$phase" = "build" ] || [ "$phase" = "deploy" ] || [ "$phase" = "restart" ]; } && [ "$(cat "$status_file" 2>/dev/null)" = "OK" ]; then
+  # NEVER during --dry-run: deploy.sh no-ops report OK, and advancing
+  # the markers without actually building would make the next real
+  # run silently skip the library changes this service still needs.
+  if ! $DRY_RUN && { [ "$phase" = "build" ] || [ "$phase" = "deploy" ] || [ "$phase" = "restart" ]; } && [ "$(cat "$status_file" 2>/dev/null)" = "OK" ]; then
     local current_sha
     current_sha=$(cd "$svc_dir" && git rev-parse HEAD 2>/dev/null || echo "")
     if [ -n "$current_sha" ]; then
@@ -665,7 +692,11 @@ fire_builds() {
       if has_changes "$svc"; then
         filtered+=("$svc")
       else
-        info "Skipping ${svc} (unchanged since last build)"
+        if [ "${IMPACT_VERDICT[$svc]:-}" = "unaffected" ]; then
+          info "Skipping ${svc} — ${IMPACT_REASON[$svc]:-library changes not imported}"
+        else
+          info "Skipping ${svc} (unchanged since last build)"
+        fi
         echo "SKIP" > "${LOG_DIR}/${svc}.build.status"
       fi
     else
@@ -1083,6 +1114,9 @@ if [ -n "$SKIP_LIST" ]; then
 fi
 if $CHANGED_ONLY; then
   printf '  %sMode: changed-only (skipping unchanged services)%s\n' "$CYAN" "$RESET"
+  if ! $SKIP_DEPS && ! $NO_IMPACT; then
+    printf '  %sImpact: symbol-level library analysis on (--no-impact to disable)%s\n' "$CYAN" "$RESET"
+  fi
 fi
 if $SKIP_DEPS; then
   printf '  %sMode: skip-deps (skipping library sync and dependency change checks)%s\n' "$CYAN" "$RESET"
@@ -1192,6 +1226,55 @@ if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN && ! $SKIP_DEPS; then
       ok "${lib_id}: up to date (no changes)"
     fi
   done
+fi
+
+# ══════════════════════════════════════════════════════════════
+# PHASE 0.5 — LIBRARY IMPACT ANALYSIS (symbol-level)
+# Instead of rebuilding every consumer whenever a library repo
+# gains a commit, scripts/lib-impact.js maps the changed library
+# files through the library's internal import graph to the exact
+# export surface (subpaths, barrel symbols, css) that changed,
+# then intersects that with what each service actually imports.
+# Services whose imports are untouched are skipped.
+# Anything the analysis cannot classify fails OPEN (= rebuild),
+# and any script failure falls back to the legacy behavior.
+# ══════════════════════════════════════════════════════════════
+declare -A IMPACT_VERDICT
+declare -A IMPACT_REASON
+IMPACT_SCRIPT_OK=false
+if $CHANGED_ONLY && ! $SKIP_DEPS && ! $NO_IMPACT; then
+  # Pair list "svc:lib1,lib2;svc2:lib1;..." — bash owns which libs
+  # each service tracks (SVC_LIB_DEPS); the script owns the verdicts.
+  _impact_pairs=""
+  for svc in "${ALL_SERVICES[@]}"; do
+    [ -n "${SVC_LIB_DEPS[$svc]:-}" ] || continue
+    _impact_pairs="${_impact_pairs}${svc}:${SVC_LIB_DEPS[$svc]// /,};"
+  done
+
+  if [ -n "$_impact_pairs" ]; then
+    step "Analyzing library change impact (symbol-level)"
+    if _impact_eval=$(node "${SCRIPT_DIR}/scripts/lib-impact.js" \
+        --root "$ROOT_DIR" \
+        --state "$DEPLOY_STATE_DIR" \
+        --projects "$PROJECTS_JSON" \
+        --pairs "$_impact_pairs" \
+        2>"${LOG_DIR}/impact.log"); then
+      eval "$_impact_eval"
+    else
+      warn "lib-impact.js failed — using legacy whole-library change detection"
+    fi
+
+    # Surface the script's summary/warning lines
+    if [ -s "${LOG_DIR}/impact.log" ]; then
+      while IFS= read -r _impact_line; do
+        case "$_impact_line" in
+          impact-warn:*) warn "${_impact_line#impact-warn: }" ;;
+          impact:*)      info "${_impact_line#impact: }" ;;
+          *)             info "$_impact_line" ;;
+        esac
+      done < "${LOG_DIR}/impact.log"
+    fi
+  fi
 fi
 
 # ── Validate all services have deploy.sh ──────────────────────

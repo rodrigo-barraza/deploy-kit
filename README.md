@@ -82,6 +82,7 @@ npm run deploy -- --skip=lupos-bot,lights-service
 | `--no-parallel` | Disable parallel builds |
 | `--changed-only` | Only build+deploy services with git changes |
 | `--skip-deps` | Skip library build and dependency change checks |
+| `--no-impact` | Disable symbol-level library impact analysis (any lib commit rebuilds all consumers) |
 | `--only=a,b` | Deploy only these specific services |
 | `--skip=a,b` | Skip these specific services |
 | `--clients` | Deploy all `*-client` services |
@@ -89,6 +90,33 @@ npm run deploy -- --skip=lupos-bot,lights-service
 | `--bots` | Deploy all `*-bot` services |
 | `--vault` | Deploy `vault-service` only |
 | `--group=x,y` | Deploy by category (`client`, `service`, `bot`, `vault`) |
+
+## Library Impact Analysis
+
+In `--changed-only` mode, a library commit no longer rebuilds every
+consumer. `scripts/lib-impact.js` maps each library's changed files
+through its internal import graph to the exact export surface that
+changed (subpath exports, barrel symbols, css), then intersects that
+with what each service actually imports (src + next.config/*.config
+files). Only services whose imports are touched rebuild.
+
+- **Cross-library propagation**: if utilities-library changes a symbol
+  that components-library uses inside e.g. `ChatComponent`, clients
+  importing `ChatComponent` are affected even without importing the
+  utilities symbol directly.
+- **Barrel edits are diffed old-vs-new**: newly *added* exports rebuild
+  nobody; removed/remapped exports rebuild their importers.
+- **Fail-open**: `package.json` changes, deleted src files, dist drift
+  without src changes, unparseable imports, or any script failure all
+  degrade to "rebuild everyone" — never a silent skip.
+- **Per-project override**: `"libImpact": "all"` in projects.json forces
+  a project to rebuild on any library change (portal-client uses this —
+  its prebuild codegen catalogs the whole library surface).
+- Skipped services log the reason:
+  `Skipping rod-dev-client — components-library: 2 files (InputComponent.tsx, …) — not imported`.
+- Debug: `node scripts/lib-impact.js --root .. --state .deploy-state \`
+  `--projects ../vault-service/projects.json --pairs "svc:lib,..." --human`
+  (add `--override-base <lib>=<sha>` to simulate a base).
 
 ## Hook Points
 

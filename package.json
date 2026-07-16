@@ -21,6 +21,8 @@
     "verify:deps": "node scripts/verify-dependencies.js",
     "deploy:accounts-client": "bash ../accounts-client/deploy.sh",
     "deploy:accounts-service": "bash ../accounts-service/deploy.sh",
+    "deploy:payments-client": "bash ../payments-client/deploy.sh",
+    "deploy:payments-service": "bash ../payments-service/deploy.sh",
     "deploy:clankerbox-client": "bash ../clankerbox-client/deploy.sh",
     "deploy:clankerbox-service": "bash ../clankerbox-service/deploy.sh",
     "deploy:classic-whitemane-client": "bash ../classic-whitemane-client/deploy.sh",

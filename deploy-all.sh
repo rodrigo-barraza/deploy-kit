@@ -294,7 +294,7 @@ done
 # To deploy them individually, use: npm run deploy -- --only=<service-id>
 # To deploy everything that changed regardless of this list, use:
 #   npm run deploy:changed-all   (or pass --ignore-temp-skip)
-TEMPORARY_SKIP="qbittorent-service,accounts-service,accounts-client,animals-service,animals-client,clankerbox-service,clankerbox-client,clock-crew-service,clock-crew-client,classic-whitemane-client,dygest-service,dygest-client,games-service,games-client,gauge-service,gauge-client,images-service,images-client,iron-service,iron-client,ledger-service,ledger-client,lights-client,lupos-client,meepothegeomancer-client,messages-service,messages-client,music-service,music-client,notes-service,notes-client,reels-service,reels-client"
+TEMPORARY_SKIP="qbittorent-service,accounts-service,accounts-client,animals-service,animals-client,clankerbox-service,clankerbox-client,clock-crew-service,clock-crew-client,classic-whitemane-client,dygest-service,dygest-client,games-service,games-client,gauge-service,gauge-client,images-service,images-client,iron-service,iron-client,ledger-service,ledger-client,lights-client,lupos-client,meepothegeomancer-client,messages-service,messages-client,music-service,music-client,notes-service,notes-client,reels-service,reels-client,payments-service,payments-client"
 if [ "${IGNORE_TEMP_SKIP:-false}" != "true" ]; then
   if [ -n "$SKIP_LIST" ]; then
     SKIP_LIST="${SKIP_LIST},${TEMPORARY_SKIP}"

@@ -117,6 +117,24 @@
     },
     "clocktopia.com": {
       "type": "A"
+    },
+    "api.lights.rod.dev": {
+      "type": "CNAME"
+    },
+    "lights.rod.dev": {
+      "type": "A"
+    },
+    "api.gauge.rod.dev": {
+      "type": "CNAME"
+    },
+    "gauge.rod.dev": {
+      "type": "CNAME"
+    },
+    "api.iron.rod.dev": {
+      "type": "CNAME"
+    },
+    "iron.rod.dev": {
+      "type": "CNAME"
     }
   }
 }

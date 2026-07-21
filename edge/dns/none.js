@@ -18,6 +18,7 @@ module.exports = {
   async listRecords() { return fail("listRecords"); },
   async createRecord() { return fail("createRecord"); },
   async updateRecord() { return fail("updateRecord"); },
+  async deleteRecord() { return fail("deleteRecord"); },
   async getPublicIp() {
     const response = await fetch("https://api.ipify.org?format=json");
     return (await response.json()).ip;

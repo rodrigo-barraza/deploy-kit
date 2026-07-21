@@ -81,6 +81,11 @@ module.exports = {
     });
   },
 
+  async deleteRecord(zone, recordId) {
+    const id = await zoneId(zone);
+    await call(`/zones/${id}/dns_records/${recordId}`, { method: 'DELETE' });
+  },
+
   async getPublicIp() {
     const response = await fetch("https://api.ipify.org?format=json");
     return (await response.json()).ip;

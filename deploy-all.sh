@@ -1665,10 +1665,19 @@ for svc in "${ALL_SERVICES[@]}"; do
   esac
 done
 
-# ── Edge config sync ─────────────────────────────────────────
-# Domain/port changes in projects.json reach the live edge proxy on every
-# deploy (hot reload, no downtime). Best-effort: an edge hiccup must never
-# fail the service deploy run. No-op unless edge enabled + proxyMode caddy.
+# ── Edge DNS + config sync ───────────────────────────────────
+# Registry domain changes reach DNS and the live edge proxy on every
+# deploy: reconcile records first (create new, prune ownership-manifest
+# entries no longer in the registry — see edge/dns-ownership.json), then
+# hot-reload routes so certs can issue for new names. Best-effort: an
+# edge hiccup must never fail the service deploy run. Both steps no-op
+# unless the edge is enabled (+ proxyMode caddy for the route sync).
+if edge_dns_output=$(node "${SCRIPT_DIR}/edge/reconcile-dns.js" --apply 2>&1); then
+  edge_dns_summary=$(printf '%s\n' "$edge_dns_output" | grep -E "in place|created|pruned" | tail -1)
+  [ -n "$edge_dns_summary" ] && printf '  %sedge dns: %s%s\n' "$DIM" "$edge_dns_summary" "$RESET"
+else
+  printf '  %s⚠ edge dns reconcile reported conflicts (services deployed fine) — run npm run edge:dns:check%s\n' "$YELLOW" "$RESET"
+fi
 if edge_sync_output=$(bash "${SCRIPT_DIR}/edge/sync-config.sh" 2>&1); then
   [ -n "$edge_sync_output" ] && printf '  %s%s%s\n' "$DIM" "$edge_sync_output" "$RESET"
 else

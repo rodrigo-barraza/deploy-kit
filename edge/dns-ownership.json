@@ -1,0 +1,122 @@
+{
+  "$comment": "Hostnames managed by edge/reconcile-dns.js — ONLY names listed here are ever deletable. Committed so ownership survives machines.",
+  "records": {
+    "home.rod.dev": {
+      "type": "A"
+    },
+    "api.tools.rod.dev": {
+      "type": "A"
+    },
+    "api.portal.rod.dev": {
+      "type": "A"
+    },
+    "api.prism.rod.dev": {
+      "type": "A"
+    },
+    "prism.rod.dev": {
+      "type": "A"
+    },
+    "portal.rod.dev": {
+      "type": "A"
+    },
+    "rod.dev": {
+      "type": "A"
+    },
+    "api.messages.rod.dev": {
+      "type": "A"
+    },
+    "messages.rod.dev": {
+      "type": "A"
+    },
+    "api.ledger.rod.dev": {
+      "type": "A"
+    },
+    "ledger.rod.dev": {
+      "type": "A"
+    },
+    "api.sessions.rod.dev": {
+      "type": "A"
+    },
+    "api.reels.rod.dev": {
+      "type": "A"
+    },
+    "reels.rod.dev": {
+      "type": "A"
+    },
+    "api.games.rod.dev": {
+      "type": "A"
+    },
+    "games.rod.dev": {
+      "type": "A"
+    },
+    "lupos.rod.dev": {
+      "type": "A"
+    },
+    "api.notes.rod.dev": {
+      "type": "CNAME"
+    },
+    "notes.rod.dev": {
+      "type": "CNAME"
+    },
+    "api.images.rod.dev": {
+      "type": "CNAME"
+    },
+    "images.rod.dev": {
+      "type": "CNAME"
+    },
+    "api.music.rod.dev": {
+      "type": "CNAME"
+    },
+    "music.rod.dev": {
+      "type": "CNAME"
+    },
+    "api.accounts.rod.dev": {
+      "type": "A"
+    },
+    "accounts.rod.dev": {
+      "type": "A"
+    },
+    "api.animals.rod.dev": {
+      "type": "CNAME"
+    },
+    "animals.rod.dev": {
+      "type": "CNAME"
+    },
+    "api.payments.rod.dev": {
+      "type": "CNAME"
+    },
+    "payments.rod.dev": {
+      "type": "CNAME"
+    },
+    "storage.rod.dev": {
+      "type": "A"
+    },
+    "assets.rod.dev": {
+      "type": "A"
+    },
+    "clock-crew.com": {
+      "type": "A"
+    },
+    "meepothegeomancer.com": {
+      "type": "A"
+    },
+    "classicwhitemane.com": {
+      "type": "A"
+    },
+    "api.dygest.me": {
+      "type": "A"
+    },
+    "dygest.me": {
+      "type": "A"
+    },
+    "api.clankerbox.com": {
+      "type": "A"
+    },
+    "clankerbox.com": {
+      "type": "A"
+    },
+    "clocktopia.com": {
+      "type": "A"
+    }
+  }
+}

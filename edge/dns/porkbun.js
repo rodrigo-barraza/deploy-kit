@@ -71,6 +71,10 @@ module.exports = {
     await call(`/dns/edit/${zone}/${id}`, { name, type, content, ttl: String(ttl) });
   },
 
+  async deleteRecord(zone, id) {
+    await call(`/dns/delete/${zone}/${id}`);
+  },
+
   async getPublicIp() {
     const json = await call("/ping");
     return json.yourIp;

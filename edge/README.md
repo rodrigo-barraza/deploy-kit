@@ -43,7 +43,7 @@ At cutover, the registry flips to `{ "proxyMode": "caddy", "enabled": true,
 | `preflight.js` | Per-domain TLS + healthPath check **plus real WebSocket 101 upgrade assertions** through the proxy |
 | `dns/provider.js` | Pluggable DNS provider interface + loader (secrets via env → vault) |
 | `dns/porkbun.js`, `dns/cloudflare.js`, `dns/none.js` | Implementations. Add your registrar as `dns/<name>.js`; map exception zones via `zoneProviders` |
-| `reconcile-dns.js` | Additive-only DNS reconciler: anchor A record + CNAMEs for every registry domain. Never edits/deletes existing records — conflicts are reported, not resolved |
+| `reconcile-dns.js` + `dns-ownership.json` | Full DNS reconciler: creates missing records, prunes ones the ownership manifest proves are managed when they leave the registry. Records it cannot prove it owns (MX/TXT/hand-made) are never touched — conflicts are reported, not resolved |
 | `ddns-update.js` | Cron-able: repoints ALL managed A records (anchor + foreign zones) when the public IP changes |
 | `Dockerfile` / `docker-compose.yml` | Caddy built with the configured provider's DNS plugin (build arg) |
 | `deploy-edge.sh` | build → ship → up → hot reload → preflight (gated on `enabled`) |
@@ -68,7 +68,7 @@ they go in `<composeDir>/.env` for the container.
 npm run edge:generate        # write generated/Caddyfile, list all routes
 npm run edge:preflight       # verify domains through the proxy (health + WS upgrade)
 npm run edge:dns:check       # DNS reconcile dry-run report
-npm run edge:dns:apply       # create missing records (requires enabled:true)
+npm run edge:dns:apply       # create missing + prune owned-but-removed records (requires enabled:true)
 npm run edge:deploy          # full pipeline (requires enabled:true)
 ```
 
@@ -101,6 +101,14 @@ provider, and the Caddy image compiles every plugin the zone map needs.
 Cross-zone domains get direct A records (they cannot CNAME to the anchor),
 and DDNS updates ALL managed A records on an IP change — not just the
 anchor. Implemented: `porkbun`, `cloudflare` (scoped token, Zone→DNS→Edit).
+
+## One-stop deploys
+
+`npm run deploy` (deploy-all.sh) finishes every run with two best-effort edge
+steps: DNS reconcile (`--apply`) then route sync + hot reload. Add a project
+with a `domain` to the registry and deploy — DNS record, route, and cert all
+materialize; remove it and its DNS record is pruned (only if the ownership
+manifest proves this tool manages it — see `dns-ownership.json`, committed).
 
 ## Cutover runbook (when ready)
 

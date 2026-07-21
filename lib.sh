@@ -90,6 +90,7 @@ fi
 DEPLOY_METHOD="${DEPLOY_METHOD:-ssh}"                 # ssh | docker-api
 DEPLOY_TARGET="${DEPLOY_TARGET:-synology}"            # device ID
 DEPLOY_HOSTNAME="${DEPLOY_HOSTNAME:-}"                # target IP
+DEPLOY_ARCH="${DEPLOY_ARCH:-}"                        # amd64 | arm64 (empty = host arch)
 DEPLOY_SSH_HOST="${DEPLOY_SSH_HOST:-nas}"             # SSH config alias
 DEPLOY_DOCKER_BIN="${DEPLOY_DOCKER_BIN:-/usr/local/bin/docker}"
 DEPLOY_DOCKER_API="${DEPLOY_DOCKER_API:-}"            # tcp://host:port
@@ -401,6 +402,36 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
     PRE_BUILD
   fi
 
+  # ── Cross-arch build (target device arch ≠ host arch) ────────
+  PLATFORM_FLAG=""
+  if [ -n "$DEPLOY_ARCH" ]; then
+    HOST_ARCH=$(uname -m)
+    case "$HOST_ARCH" in
+      x86_64)        HOST_ARCH="amd64" ;;
+      aarch64|arm64) HOST_ARCH="arm64" ;;
+    esac
+    if [ "$DEPLOY_ARCH" != "$HOST_ARCH" ]; then
+      PLATFORM_FLAG="--platform=linux/${DEPLOY_ARCH}"
+      case "$DEPLOY_ARCH" in
+        arm64) QEMU_HANDLER="qemu-aarch64" ;;
+        amd64) QEMU_HANDLER="qemu-x86_64" ;;
+        *)     QEMU_HANDLER="qemu-${DEPLOY_ARCH}" ;;
+      esac
+      # binfmt registrations don't survive reboots (notably WSL2) —
+      # re-install the QEMU handler on demand.
+      if [ ! -f "/proc/sys/fs/binfmt_misc/${QEMU_HANDLER}" ] && ! $DRY_RUN; then
+        step "Installing QEMU binfmt handler for ${DEPLOY_ARCH}"
+        docker run --privileged --rm tonistiigi/binfmt --install "$DEPLOY_ARCH" > /dev/null 2>&1 || true
+        if [ -f "/proc/sys/fs/binfmt_misc/${QEMU_HANDLER}" ]; then
+          ok "binfmt handler ${QEMU_HANDLER} installed"
+        else
+          fail "Cannot emulate ${DEPLOY_ARCH} on this host — binfmt install failed. Run manually: docker run --privileged --rm tonistiigi/binfmt --install ${DEPLOY_ARCH}"
+        fi
+      fi
+      info "Cross-building linux/${DEPLOY_ARCH} on ${HOST_ARCH} host (QEMU emulation)"
+    fi
+  fi
+
   step "Building Docker image"
   info "Tags: ${TAG_LATEST}, ${TAG_SHA}"
 
@@ -425,6 +456,7 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
     timeout --kill-after=30 "${BUILD_TIMEOUT}" \
       docker buildx build \
       --load \
+      $PLATFORM_FLAG \
       --ssh default \
       $NO_CACHE \
       $BUILD_EXTRA_FLAGS \

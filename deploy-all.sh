@@ -163,6 +163,7 @@ declare -A SVC_DEPS       # service-id -> space-separated all dependency IDs
 # Device metadata (populated from projects.json devices array)
 declare -A DEVICE_METHOD      # device-id -> ssh | docker-api
 declare -A DEVICE_HOSTNAME    # device-id -> IP/hostname
+declare -A DEVICE_ARCH        # device-id -> amd64 | arm64 (empty = host arch)
 declare -A DEVICE_SSH_ALIAS   # device-id -> SSH config alias
 declare -A DEVICE_DOCKER_BIN  # device-id -> path to docker binary
 declare -A DEVICE_DOCKER_API  # device-id -> tcp://host:port
@@ -302,6 +303,42 @@ if [ "${IGNORE_TEMP_SKIP:-false}" != "true" ]; then
     SKIP_LIST="$TEMPORARY_SKIP"
   fi
 fi
+
+# ── Cross-arch preflight (QEMU binfmt) ────────────────────────
+# Only runs when at least one project targets a device whose arch
+# differs from this host. Installs the handler once up front so
+# parallel builds don't race the privileged installer container.
+# (binfmt registrations don't survive reboots, notably WSL2.)
+HOST_ARCH=$(uname -m)
+case "$HOST_ARCH" in
+  x86_64)        HOST_ARCH="amd64" ;;
+  aarch64|arm64) HOST_ARCH="arm64" ;;
+esac
+declare -A _FOREIGN_ARCHES=()
+for _svc in "${!SVC_DEPLOY_TARGET[@]}"; do
+  _arch="${DEVICE_ARCH[${SVC_DEPLOY_TARGET[$_svc]}]:-}"
+  if [ -n "$_arch" ] && [ "$_arch" != "$HOST_ARCH" ]; then
+    _FOREIGN_ARCHES[$_arch]=1
+  fi
+done
+for _arch in "${!_FOREIGN_ARCHES[@]}"; do
+  case "$_arch" in
+    arm64) _handler="qemu-aarch64" ;;
+    amd64) _handler="qemu-x86_64" ;;
+    *)     _handler="qemu-${_arch}" ;;
+  esac
+  if [ ! -f "/proc/sys/fs/binfmt_misc/${_handler}" ] && ! $DRY_RUN; then
+    step "Installing QEMU binfmt handler for ${_arch} (cross-arch deploy target configured)"
+    docker run --privileged --rm tonistiigi/binfmt --install "$_arch" > /dev/null 2>&1 || true
+    if [ -f "/proc/sys/fs/binfmt_misc/${_handler}" ]; then
+      ok "binfmt handler ${_handler} installed"
+    else
+      fail "Cannot emulate ${_arch} on this host — binfmt install failed. Run manually: docker run --privileged --rm tonistiigi/binfmt --install ${_arch}"
+      exit 1
+    fi
+  fi
+done
+unset _svc _arch _handler _FOREIGN_ARCHES
 
 # ── Prefetch git.sha image labels (one docker call, not N) ────
 # has_changes() needs the git.sha label of every <svc>:latest image.
@@ -557,6 +594,7 @@ run_phase() {
   export DEPLOY_TARGET="$target"
   export DEPLOY_METHOD="${DEVICE_METHOD[$target]:-ssh}"
   export DEPLOY_HOSTNAME="${DEVICE_HOSTNAME[$target]:-}"
+  export DEPLOY_ARCH="${DEVICE_ARCH[$target]:-}"
   export DEPLOY_SSH_HOST="${DEVICE_SSH_ALIAS[$target]:-nas}"
   export DEPLOY_DOCKER_BIN="${DEVICE_DOCKER_BIN[$target]:-/usr/local/bin/docker}"
   export DEPLOY_DOCKER_API="${DEVICE_DOCKER_API[$target]:-}"

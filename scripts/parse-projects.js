@@ -27,6 +27,7 @@ try {
     const method = deployment.method || 'ssh';
     console.log(`DEVICE_METHOD[${device.id}]="${method}"`);
     console.log(`DEVICE_HOSTNAME[${device.id}]="${device.hostname || ''}"`);
+    console.log(`DEVICE_ARCH[${device.id}]="${device.arch || ''}"`);
     console.log(`DEVICE_SSH_ALIAS[${device.id}]="${device.sshAlias || ''}"`);
     console.log(`DEVICE_DOCKER_BIN[${device.id}]="${device.dockerBin || deployment.dockerBin || 'docker'}"`);
     console.log(`DEVICE_DOCKER_API[${device.id}]="${device.dockerApi || deployment.dockerApi || ''}"`);

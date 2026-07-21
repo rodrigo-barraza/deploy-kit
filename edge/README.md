@@ -24,7 +24,11 @@ Example (current live state — DSM is still the proxy today):
 
 ```jsonc
 // projects.json
-"edge": { "proxyMode": "dsm" }
+"edge": {
+  "proxyMode": "dsm",
+  "publicIp": "216.19.178.138",          // static IP declared; "auto" = dynamic
+  "zoneProviders": { "clankerbox.com": "cloudflare" }
+}
 ```
 
 At cutover, the registry flips to `{ "proxyMode": "caddy", "enabled": true,
@@ -109,10 +113,13 @@ anchor. Implemented: `porkbun`, `cloudflare` (scoped token, Zone→DNS→Edit).
 5. Router: forward public 80 → NAS:18080 and 443 → NAS:18443 (currently they
    point at DSM's 80/443). DSM's own rules stay untouched = instant rollback
    by reverting the router change.
-6. Schedule DDNS on the NAS (Task Scheduler, every 5 min):
+6. DDNS: with `publicIp: "auto"` (dynamic IP), schedule on the NAS (Task
+   Scheduler, every 5 min):
    `PROJECTS_JSON_PATH=/volume1/docker/vault-service/projects.json node /volume1/docker/edge/ddns-update.js`
-   and add an
-   `edge-caddy` entry to the portal watchdog.
+   With a declared static `publicIp`, scheduling is optional insurance —
+   records are enforced to the declared IP and it warns loudly if the
+   egress IP ever disagrees. Either way, add an `edge-caddy` entry to the
+   portal watchdog.
 7. After a quiet week: delete the DSM reverse-proxy rules.
 
 ## Notes

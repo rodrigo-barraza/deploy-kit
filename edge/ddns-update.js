@@ -1,15 +1,20 @@
-// DDNS: keep every MANAGED A record pointed at the current public IP.
+// DDNS: keep every MANAGED A record pointed at the right public IP.
 // That's the anchor plus zone apexes / foreign-zone domains (which can't
 // CNAME to the anchor) — each updated through its own zone's DNS provider.
 // CNAMEs never need touching.
 //
-// Intended to run on a schedule (NAS cron / Task Scheduler, e.g. every 5m):
-//   node /volume1/docker/edge/ddns-update.js
+// publicIp "auto" (dynamic): records FOLLOW the detected egress IP — run
+// this on a schedule (NAS cron / Task Scheduler, e.g. every 5m):
+//   PROJECTS_JSON_PATH=/volume1/docker/vault-service/projects.json node /volume1/docker/edge/ddns-update.js
+// publicIp "<ip>" (static): records are ENFORCED to the declared IP —
+// scheduling is optional insurance; it warns loudly if the egress IP ever
+// stops matching the declaration (a "static" IP that quietly changed).
+//
 // Exits 0 quietly when nothing changed. Requires enabled:true to write.
 
 const fs = require("fs");
 const path = require("path");
-const { providerForZone, planRecords } = require("./dns/provider.js");
+const { providerForZone, planRecords, resolvePublicIp } = require("./dns/provider.js");
 
 const EDGE_DIR = __dirname;
 const ROOT_DIR = path.join(EDGE_DIR, "..", "..");
@@ -26,7 +31,10 @@ async function main() {
     .concat((config.extraSites || []).map((s) => s.domain));
 
   const aRecordPlan = planRecords(domains, anchor, config).filter((e) => e.contentKind === "publicIp");
-  const publicIp = await providerForZone("", { ...config, zoneProviders: {} }).getPublicIp();
+  const { ip: publicIp } = await resolvePublicIp(
+    config,
+    providerForZone("", { ...config, zoneProviders: {} }),
+  );
 
   const byZone = new Map();
   for (const entry of aRecordPlan) {

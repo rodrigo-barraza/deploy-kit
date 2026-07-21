@@ -16,7 +16,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { providerForZone, planRecords } = require("./dns/provider.js");
+const { providerForZone, planRecords, resolvePublicIp } = require("./dns/provider.js");
 
 const EDGE_DIR = __dirname;
 const ROOT_DIR = path.join(EDGE_DIR, "..", "..");
@@ -44,9 +44,12 @@ async function main() {
     byZone.get(entry.zone).push(entry);
   }
 
-  // Public IP via the default provider (any provider can answer this).
-  const publicIp = await providerForZone("", { ...config, zoneProviders: {} }).getPublicIp();
-  console.log(`Public IP: ${publicIp} | anchor: ${anchor} | mode: ${apply ? "APPLY" : "dry-run"}\n`);
+  // Target IP: declared static value, or detected via the default provider.
+  const { ip: publicIp, mode: ipMode } = await resolvePublicIp(
+    config,
+    providerForZone("", { ...config, zoneProviders: {} }),
+  );
+  console.log(`Public IP: ${publicIp} (${ipMode}) | anchor: ${anchor} | mode: ${apply ? "APPLY" : "dry-run"}\n`);
 
   let created = 0, ok = 0, conflicts = 0;
 

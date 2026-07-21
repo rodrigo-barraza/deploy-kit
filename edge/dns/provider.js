@@ -100,4 +100,30 @@ function planRecords(domains, anchor, config) {
   return plan;
 }
 
-module.exports = { loadProvider, getSecret, zoneForDomain, providerForZone, planRecords };
+/**
+ * The IP all managed A records should carry.
+ *
+ * config.publicIp: "auto" (dynamic connection — detect the egress IP each
+ * run) or an explicit IP (static connection — the declared value is the
+ * source of truth). In static mode the egress IP is still detected
+ * best-effort purely to WARN when reality disagrees with the declaration
+ * (ISP silently changed a "static" IP, or you're running from elsewhere).
+ */
+async function resolvePublicIp(config, provider) {
+  const declared = config.publicIp && config.publicIp !== "auto" ? config.publicIp : null;
+  let detected = null;
+  try {
+    detected = await provider.getPublicIp();
+  } catch (error) {
+    if (!declared) throw error; // dynamic mode cannot proceed without detection
+  }
+  if (declared && detected && detected !== declared) {
+    console.warn(
+      `⚠ Declared static publicIp ${declared} but current egress IP is ${detected} — ` +
+        `records follow the DECLARED value; update the registry if the static IP really changed.`,
+    );
+  }
+  return { ip: declared || detected, mode: declared ? "static" : "dynamic", detected };
+}
+
+module.exports = { loadProvider, getSecret, zoneForDomain, providerForZone, planRecords, resolvePublicIp };

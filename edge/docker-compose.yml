@@ -1,0 +1,25 @@
+# Edge proxy (Caddy) — NOT part of the regular deploy fleet until
+# edge.config.json enabled:true and deploy-edge.sh ships it.
+#
+# Runs on host ports 18080/18443; the public cutover is a ROUTER change
+# (forward 80→18080, 443→18443), leaving DSM's own proxy untouched as
+# rollback. Secrets (DNS provider API keys) come from .env in this
+# directory on the NAS — see README.
+
+services:
+  edge-caddy:
+    image: edge-caddy:latest
+    container_name: edge-caddy
+    restart: unless-stopped
+    ports:
+      - "18080:80"
+      - "18443:443"
+      - "18443:443/udp" # HTTP/3
+      - "127.0.0.1:2019:2019" # admin API — localhost only
+    environment:
+      - PORKBUN_API_KEY=${PORKBUN_API_KEY:-}
+      - PORKBUN_API_SECRET_KEY=${PORKBUN_API_SECRET_KEY:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy-data:/data # certs — MUST persist across restarts
+      - ./caddy-config:/config

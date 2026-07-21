@@ -55,7 +55,12 @@
     "deploy:rod-dev-client": "bash ../rod-dev-client/deploy.sh",
     "deploy:sessions-service": "bash ../sessions-service/deploy.sh",
     "deploy:tools-service": "bash ../tools-service/deploy.sh",
-    "deploy:vault-service": "bash ../vault-service/deploy.sh"
+    "deploy:vault-service": "bash ../vault-service/deploy.sh",
+    "edge:generate": "node edge/generate-caddyfile.js",
+    "edge:preflight": "node edge/preflight.js",
+    "edge:dns:check": "node edge/reconcile-dns.js",
+    "edge:dns:apply": "node edge/reconcile-dns.js --apply",
+    "edge:deploy": "bash edge/deploy-edge.sh"
   },
   "packageManager": "pnpm@11.8.0"
 }

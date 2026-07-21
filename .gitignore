@@ -16,3 +16,4 @@ test-components-lib/
 
 # Migrated to pnpm
 package-lock.json
+edge/generated/

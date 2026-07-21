@@ -20,16 +20,21 @@ async function credentials() {
 
 async function call(endpoint, body = {}) {
   const auth = await credentials();
-  const response = await fetch(`${API_BASE}${endpoint}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...auth, ...body }),
-  });
-  const json = await response.json().catch(() => ({}));
-  if (!response.ok || json.status !== "SUCCESS") {
-    throw new Error(`Porkbun ${endpoint} failed: ${json.message || response.status}`);
+  // Porkbun's API 503s transiently — retry with backoff before surfacing.
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const response = await fetch(`${API_BASE}${endpoint}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...auth, ...body }),
+    });
+    const json = await response.json().catch(() => ({}));
+    if (response.ok && json.status === "SUCCESS") return json;
+    lastError = new Error(`Porkbun ${endpoint} failed: ${json.message || response.status}`);
+    if (response.status < 500) break; // 4xx = real error, don't retry
+    await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
   }
-  return json;
+  throw lastError;
 }
 
 /** Porkbun returns fully-qualified names; normalize to the subdomain part. */

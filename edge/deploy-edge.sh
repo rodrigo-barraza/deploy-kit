@@ -49,14 +49,22 @@ echo "→ Building edge-caddy image (plugins: ${CADDY_PLUGINS:-none})..."
 docker build --build-arg CADDY_DNS_PLUGINS="${CADDY_PLUGINS}" -t edge-caddy:latest "${EDGE_DIR}"
 
 echo "→ Shipping to ${SSH_ALIAS}:${COMPOSE_DIR}..."
-ssh "${SSH_ALIAS}" "mkdir -p '${COMPOSE_DIR}'"
+# Bind-mount dirs must pre-exist — Synology's docker refuses to create them.
+ssh "${SSH_ALIAS}" "mkdir -p '${COMPOSE_DIR}/dns' '${COMPOSE_DIR}/caddy-data' '${COMPOSE_DIR}/caddy-config'"
 docker save edge-caddy:latest | ssh "${SSH_ALIAS}" "sudo /usr/local/bin/docker load"
-scp "${EDGE_DIR}/generated/Caddyfile" "${SSH_ALIAS}:${COMPOSE_DIR}/Caddyfile"
-scp "${EDGE_DIR}/docker-compose.yml" "${SSH_ALIAS}:${COMPOSE_DIR}/docker-compose.yml"
+
+# Synology sshd drops modern scp connections — ship via ssh pipes instead.
+ship() { cat "$1" | ssh "${SSH_ALIAS}" "cat > '${COMPOSE_DIR}/$2'"; }
+ship "${EDGE_DIR}/generated/Caddyfile" Caddyfile
+ship "${EDGE_DIR}/docker-compose.yml" docker-compose.yml
 # ddns-update.js runs on the NAS via cron and needs its helpers + config.
 # The NAS registry path differs, hence PROJECTS_JSON_PATH (see README).
-scp -r "${EDGE_DIR}/dns" "${SSH_ALIAS}:${COMPOSE_DIR}/dns"
-scp "${EDGE_DIR}/ddns-update.js" "${EDGE_DIR}/edge-config.js" "${EDGE_DIR}/edge.config.json" "${SSH_ALIAS}:${COMPOSE_DIR}/"
+ship "${EDGE_DIR}/ddns-update.js" ddns-update.js
+ship "${EDGE_DIR}/edge-config.js" edge-config.js
+ship "${EDGE_DIR}/edge.config.json" edge.config.json
+for provider_file in "${EDGE_DIR}"/dns/*.js; do
+  ship "${provider_file}" "dns/$(basename "${provider_file}")"
+done
 
 echo "→ Starting / reloading..."
 ssh "${SSH_ALIAS}" "cd '${COMPOSE_DIR}' && sudo /usr/local/bin/docker compose up -d && sudo /usr/local/bin/docker exec edge-caddy caddy reload --config /etc/caddy/Caddyfile" \

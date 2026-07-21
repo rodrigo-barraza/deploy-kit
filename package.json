@@ -18,6 +18,7 @@
     "cleanup": "bash cleanup-local-images.sh",
     "cleanup:force": "bash cleanup-local-images.sh --force",
     "deploy:sync": "bash sync-deploy-scripts.sh",
+    "bootstrap:host": "bash -c 'if [ -z \"$0\" ] || [ \"$0\" = \"bash\" ]; then echo \"Usage: npm run bootstrap:host -- <user>@<host>\"; exit 1; fi; ssh \"$0\" \"sudo bash -s\" < scripts/bootstrap-docker-host.sh'",
     "verify:deps": "node scripts/verify-dependencies.js",
     "deploy:accounts-client": "bash ../accounts-client/deploy.sh",
     "deploy:accounts-service": "bash ../accounts-service/deploy.sh",

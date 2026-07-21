@@ -575,6 +575,8 @@ deploy_docker_api() {
 
   # Verify connectivity
   if ! docker -H "$remote_host" info > /dev/null 2>&1; then
+    info "If Docker or its TCP API isn't set up on ${DEPLOY_TARGET} yet, bootstrap it with:"
+    info "  npm run bootstrap:host -- <user>@${DEPLOY_HOSTNAME:-<host>}"
     fail "Cannot connect to Docker API at ${remote_host}"
   fi
   ok "Docker API at ${remote_host} reachable"

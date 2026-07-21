@@ -65,4 +65,39 @@ function zoneForDomain(domain, zoneOverrides = {}) {
   return labels.slice(-2).join(".");
 }
 
-module.exports = { loadProvider, getSecret, zoneForDomain };
+/**
+ * Provider for a zone: config.zoneProviders["clankerbox.com"] = "cloudflare"
+ * wins; otherwise the global config.dnsProvider default. Domains can live at
+ * different registrars — each zone talks to its own provider.
+ */
+function providerForZone(zone, config) {
+  const name = (config.zoneProviders || {})[zone] || config.dnsProvider;
+  return loadProvider(name);
+}
+
+/**
+ * The record plan shared by reconcile-dns.js (create missing) and
+ * ddns-update.js (repoint stale A records on IP change):
+ *   anchor + zone apexes + anything outside the anchor's zone → A record @ public IP
+ *   subdomains inside the anchor's zone → CNAME → anchor
+ */
+function planRecords(domains, anchor, config) {
+  const zoneOverrides = config.zoneOverrides || {};
+  const anchorZone = zoneForDomain(anchor, zoneOverrides);
+  const plan = [];
+  for (const domain of new Set([anchor, ...domains])) {
+    const zone = zoneForDomain(domain, zoneOverrides);
+    const name = domain === zone ? "" : domain.slice(0, -(zone.length + 1));
+    const isARecord = domain === anchor || name === "" || zone !== anchorZone;
+    plan.push({
+      domain,
+      zone,
+      name,
+      type: isARecord ? "A" : "CNAME",
+      contentKind: isARecord ? "publicIp" : "anchor",
+    });
+  }
+  return plan;
+}
+
+module.exports = { loadProvider, getSecret, zoneForDomain, providerForZone, planRecords };

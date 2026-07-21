@@ -19,6 +19,7 @@ services:
     environment:
       - PORKBUN_API_KEY=${PORKBUN_API_KEY:-}
       - PORKBUN_API_SECRET_KEY=${PORKBUN_API_SECRET_KEY:-}
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./caddy-data:/data # certs — MUST persist across restarts

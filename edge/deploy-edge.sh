@@ -25,27 +25,38 @@ if [ "${proxy_mode}" != "caddy" ]; then
   exit 1
 fi
 
-read -r SSH_ALIAS COMPOSE_DIR DNS_PROVIDER < <(node -e "
+read -r SSH_ALIAS COMPOSE_DIR < <(node -e "
 const config = require('${EDGE_DIR}/edge-config.js').loadEdgeConfig();
-console.log(['nas', config.composeDir, config.dnsProvider].join(' '));
+console.log(['nas', config.composeDir].join(' '));
 ")
-CADDY_PLUGIN=$(node -e "
+# Union of plugins across the default provider and every zoneProviders entry.
+CADDY_PLUGINS=$(node -e "
 const { loadProvider } = require('${EDGE_DIR}/dns/provider.js');
-console.log(loadProvider('${DNS_PROVIDER}').caddyPlugin || '');
+const config = require('${EDGE_DIR}/edge-config.js').loadEdgeConfig();
+const names = new Set([config.dnsProvider, ...Object.values(config.zoneProviders || {})]);
+const plugins = new Set();
+for (const name of names) {
+  const plugin = loadProvider(name).caddyPlugin;
+  if (plugin) plugins.add(plugin);
+}
+console.log([...plugins].join(' '));
 ")
 
 echo "→ Generating Caddyfile from registry..."
 node "${EDGE_DIR}/generate-caddyfile.js"
 
-echo "→ Building edge-caddy image (plugin: ${CADDY_PLUGIN:-none})..."
-docker build --build-arg CADDY_DNS_PLUGIN="${CADDY_PLUGIN}" -t edge-caddy:latest "${EDGE_DIR}"
+echo "→ Building edge-caddy image (plugins: ${CADDY_PLUGINS:-none})..."
+docker build --build-arg CADDY_DNS_PLUGINS="${CADDY_PLUGINS}" -t edge-caddy:latest "${EDGE_DIR}"
 
 echo "→ Shipping to ${SSH_ALIAS}:${COMPOSE_DIR}..."
 ssh "${SSH_ALIAS}" "mkdir -p '${COMPOSE_DIR}'"
 docker save edge-caddy:latest | ssh "${SSH_ALIAS}" "sudo /usr/local/bin/docker load"
 scp "${EDGE_DIR}/generated/Caddyfile" "${SSH_ALIAS}:${COMPOSE_DIR}/Caddyfile"
 scp "${EDGE_DIR}/docker-compose.yml" "${SSH_ALIAS}:${COMPOSE_DIR}/docker-compose.yml"
-scp "${EDGE_DIR}/ddns-update.js" "${SSH_ALIAS}:${COMPOSE_DIR}/ddns-update.js" 2>/dev/null || true
+# ddns-update.js runs on the NAS via cron and needs its helpers + config.
+# The NAS registry path differs, hence PROJECTS_JSON_PATH (see README).
+scp -r "${EDGE_DIR}/dns" "${SSH_ALIAS}:${COMPOSE_DIR}/dns"
+scp "${EDGE_DIR}/ddns-update.js" "${EDGE_DIR}/edge-config.js" "${EDGE_DIR}/edge.config.json" "${SSH_ALIAS}:${COMPOSE_DIR}/"
 
 echo "→ Starting / reloading..."
 ssh "${SSH_ALIAS}" "cd '${COMPOSE_DIR}' && sudo /usr/local/bin/docker compose up -d && sudo /usr/local/bin/docker exec edge-caddy caddy reload --config /etc/caddy/Caddyfile" \

@@ -10,8 +10,6 @@ streaming for weeks) cannot occur here.
 `deploy-edge.sh` refuses to run until it's flipped. Generation, preflight, and
 DNS dry-runs all work without deploying anything.
 
-## Pieces
-
 ## Settings — projects.json is the source of truth
 
 Settings resolve in two layers via `edge-config.js`:
@@ -40,9 +38,9 @@ At cutover, the registry flips to `{ "proxyMode": "caddy", "enabled": true,
 | `generate-caddyfile.js` | registry + config → `generated/Caddyfile` |
 | `preflight.js` | Per-domain TLS + healthPath check **plus real WebSocket 101 upgrade assertions** through the proxy |
 | `dns/provider.js` | Pluggable DNS provider interface + loader (secrets via env → vault) |
-| `dns/porkbun.js`, `dns/none.js` | Implementations. Add your registrar as `dns/<name>.js` and set `dnsProvider` |
+| `dns/porkbun.js`, `dns/cloudflare.js`, `dns/none.js` | Implementations. Add your registrar as `dns/<name>.js`; map exception zones via `zoneProviders` |
 | `reconcile-dns.js` | Additive-only DNS reconciler: anchor A record + CNAMEs for every registry domain. Never edits/deletes existing records — conflicts are reported, not resolved |
-| `ddns-update.js` | Cron-able: repoints the single anchor record when the public IP changes |
+| `ddns-update.js` | Cron-able: repoints ALL managed A records (anchor + foreign zones) when the public IP changes |
 | `Dockerfile` / `docker-compose.yml` | Caddy built with the configured provider's DNS plugin (build arg) |
 | `deploy-edge.sh` | build → ship → up → hot reload → preflight (gated on `enabled`) |
 
@@ -85,6 +83,21 @@ and the rest keeps working *against your DSM proxy*:
 
 You keep clicking rules into DSM by hand; the module verifies them.
 
+## Domains at other registrars
+
+The default provider covers most zones; exceptions go in `zoneProviders`
+(registry `edge` block or defaults file):
+
+```jsonc
+"edge": { "zoneProviders": { "clankerbox.com": "cloudflare" } }
+```
+
+Reconciliation, DDNS, and DNS-01 cert challenges all use each zone's own
+provider, and the Caddy image compiles every plugin the zone map needs.
+Cross-zone domains get direct A records (they cannot CNAME to the anchor),
+and DDNS updates ALL managed A records on an IP change — not just the
+anchor. Implemented: `porkbun`, `cloudflare` (scoped token, Zone→DNS→Edit).
+
 ## Cutover runbook (when ready)
 
 1. Vault/env: add the DNS provider keys; create `<composeDir>/.env` on the NAS.
@@ -96,7 +109,9 @@ You keep clicking rules into DSM by hand; the module verifies them.
 5. Router: forward public 80 → NAS:18080 and 443 → NAS:18443 (currently they
    point at DSM's 80/443). DSM's own rules stay untouched = instant rollback
    by reverting the router change.
-6. Schedule `ddns-update.js` (NAS Task Scheduler, every 5 min) and add an
+6. Schedule DDNS on the NAS (Task Scheduler, every 5 min):
+   `PROJECTS_JSON_PATH=/volume1/docker/vault-service/projects.json node /volume1/docker/edge/ddns-update.js`
+   and add an
    `edge-caddy` entry to the portal watchdog.
 7. After a quiet week: delete the DSM reverse-proxy rules.
 

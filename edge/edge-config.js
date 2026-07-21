@@ -13,7 +13,7 @@ const path = require("path");
 
 const EDGE_DIR = __dirname;
 const ROOT_DIR = path.join(EDGE_DIR, "..", "..");
-const PROJECTS_JSON = path.join(ROOT_DIR, "vault-service", "projects.json");
+const PROJECTS_JSON = process.env.PROJECTS_JSON_PATH || path.join(ROOT_DIR, "vault-service", "projects.json");
 const DEFAULTS_PATH = path.join(EDGE_DIR, "edge.config.json");
 
 function stripComments(object) {

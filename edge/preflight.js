@@ -16,7 +16,7 @@ const crypto = require("crypto");
 
 const EDGE_DIR = __dirname;
 const ROOT_DIR = path.join(EDGE_DIR, "..", "..");
-const registry = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, "vault-service", "projects.json"), "utf8"));
+const registry = JSON.parse(fs.readFileSync(process.env.PROJECTS_JSON_PATH || path.join(ROOT_DIR, "vault-service", "projects.json"), "utf8"));
 const config = require("./edge-config.js").loadEdgeConfig();
 
 const args = process.argv.slice(2);

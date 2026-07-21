@@ -1665,6 +1665,16 @@ for svc in "${ALL_SERVICES[@]}"; do
   esac
 done
 
+# ── Edge config sync ─────────────────────────────────────────
+# Domain/port changes in projects.json reach the live edge proxy on every
+# deploy (hot reload, no downtime). Best-effort: an edge hiccup must never
+# fail the service deploy run. No-op unless edge enabled + proxyMode caddy.
+if edge_sync_output=$(bash "${SCRIPT_DIR}/edge/sync-config.sh" 2>&1); then
+  [ -n "$edge_sync_output" ] && printf '  %s%s%s\n' "$DIM" "$edge_sync_output" "$RESET"
+else
+  printf '  %s⚠ edge config sync failed (services deployed fine): %s%s\n' "$YELLOW" "$edge_sync_output" "$RESET"
+fi
+
 echo ""
 summary_msg=""
 if [ "$UNHEALTHY_COUNT" -gt 0 ]; then

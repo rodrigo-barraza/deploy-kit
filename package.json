@@ -60,7 +60,8 @@
     "edge:preflight": "node edge/preflight.js",
     "edge:dns:check": "node edge/reconcile-dns.js",
     "edge:dns:apply": "node edge/reconcile-dns.js --apply",
-    "edge:deploy": "bash edge/deploy-edge.sh"
+    "edge:deploy": "bash edge/deploy-edge.sh",
+    "edge:sync": "bash edge/sync-config.sh"
   },
   "packageManager": "pnpm@11.8.0"
 }

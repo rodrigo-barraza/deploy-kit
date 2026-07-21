@@ -20,7 +20,7 @@ const { loadProvider, zoneForDomain } = require("./dns/provider.js");
 const EDGE_DIR = __dirname;
 const ROOT_DIR = path.join(EDGE_DIR, "..", "..");
 const registry = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, "vault-service", "projects.json"), "utf8"));
-const config = JSON.parse(fs.readFileSync(path.join(EDGE_DIR, "edge.config.json"), "utf8"));
+const config = require("./edge-config.js").loadEdgeConfig();
 
 const apply = process.argv.includes("--apply") && config.enabled;
 if (process.argv.includes("--apply") && !config.enabled) {

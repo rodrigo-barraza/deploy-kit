@@ -1,33 +1,29 @@
 {
   "$comment": "Edge proxy (Caddy) configuration. This file is committed — put SECRETS in env/vault, never here. See edge/README.md.",
-
   "enabled": false,
   "$enabled": "Master switch. While false, deploy-edge.sh refuses to ship anything — generate/preflight/reconcile still work (reconcile stays dry-run).",
-
+  "proxyMode": "caddy",
+  "$proxyMode": "'caddy' = the managed container this module deploys. 'dsm' = keep Synology's (or any other hand-managed) reverse proxy: Caddyfile generation and deploy stand down, but DNS reconciliation, DDNS, and preflight verification all still run — preflight then connects to each domain's public endpoint (port 443) and asserts health + WebSocket upgrades against YOUR proxy.",
   "dnsProvider": "porkbun",
   "$dnsProvider": "Pluggable: any provider implemented in edge/dns/ ('porkbun', 'none', ...). 'none' disables DNS automation and DNS-01 certs — Caddy then uses HTTP-01, which requires public port 80. Add a provider by dropping a module in edge/dns/ that implements the interface in edge/dns/provider.js.",
-
   "tlsMode": "internal",
   "$tlsMode": "'internal' = Caddy's self-signed CA (pre-cutover testing, preflight uses --insecure). 'auto' = real ACME certs; uses the DNS-01 challenge when dnsProvider != 'none' (works BEFORE the router flip — no inbound traffic needed).",
-
   "httpPort": 18080,
   "httpsPort": 18443,
   "$ports": "Host ports the Caddy container publishes on the NAS. At cutover the router forwards public 80→18080 and 443→18443. DSM keeps its own 80/443 untouched (instant rollback).",
-
   "deployDevice": "synology",
   "composeDir": "/volume1/docker/edge",
-
   "anchorRecord": "home.rod.dev",
   "$anchorRecord": "Single A record the reconciler points at the current public IP; every other managed hostname becomes CNAME/ALIAS → anchor. An ISP IP change is then one ddns-update call.",
-
   "zoneOverrides": {},
   "$zoneOverrides": "Map domain → DNS zone for cases the default 'last two labels' heuristic gets wrong (e.g. \"foo.co.uk\": \"foo.co.uk\").",
-
   "extraSites": [],
   "$extraSites": "Routes for things NOT in the registry (DSM apps etc.): [{ \"domain\": \"nas.rod.dev\", \"upstream\": \"192.168.86.2:5001\" }]",
-
   "wsChecks": [
-    { "domain": "api.prism.rod.dev", "path": "/ws/chat?project=any&username=preflight" }
+    {
+      "domain": "api.prism.rod.dev",
+      "path": "/ws/chat?project=any&username=preflight"
+    }
   ],
   "$wsChecks": "Preflight asserts a real WebSocket 101 upgrade through the proxy for these — the exact failure class the DSM proxy silently caused."
 }

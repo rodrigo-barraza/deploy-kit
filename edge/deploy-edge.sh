@@ -7,17 +7,26 @@
 set -euo pipefail
 
 EDGE_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONFIG="${EDGE_DIR}/edge.config.json"
+# Settings resolve through edge-config.js: edge.config.json defaults,
+# overridden by the "edge" block in vault-service/projects.json (the SoT).
 
-enabled=$(node -e "console.log(JSON.parse(require('fs').readFileSync('${CONFIG}','utf8')).enabled)")
+enabled=$(node -e "console.log(require('${EDGE_DIR}/edge-config.js').loadEdgeConfig().enabled)")
 if [ "${enabled}" != "true" ]; then
   echo "✋ edge.config.json has enabled:false — groundwork only, nothing deployed."
   echo "   Flip \"enabled\": true when ready (see edge/README.md cutover runbook)."
   exit 1
 fi
 
+proxy_mode=$(node -e "console.log(require('${EDGE_DIR}/edge-config.js').loadEdgeConfig().proxyMode || 'caddy')")
+if [ "${proxy_mode}" != "caddy" ]; then
+  echo "✋ proxyMode is \"${proxy_mode}\" — this setup uses its own reverse proxy (e.g. Synology DSM)."
+  echo "   Nothing to deploy. DNS automation (edge:dns:*) and verification (edge:preflight)"
+  echo "   still work against your proxy."
+  exit 1
+fi
+
 read -r SSH_ALIAS COMPOSE_DIR DNS_PROVIDER < <(node -e "
-const config = JSON.parse(require('fs').readFileSync('${CONFIG}','utf8'));
+const config = require('${EDGE_DIR}/edge-config.js').loadEdgeConfig();
 console.log(['nas', config.composeDir, config.dnsProvider].join(' '));
 ")
 CADDY_PLUGIN=$(node -e "

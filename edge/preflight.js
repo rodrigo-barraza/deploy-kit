@@ -17,7 +17,7 @@ const crypto = require("crypto");
 const EDGE_DIR = __dirname;
 const ROOT_DIR = path.join(EDGE_DIR, "..", "..");
 const registry = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, "vault-service", "projects.json"), "utf8"));
-const config = JSON.parse(fs.readFileSync(path.join(EDGE_DIR, "edge.config.json"), "utf8"));
+const config = require("./edge-config.js").loadEdgeConfig();
 
 const args = process.argv.slice(2);
 const argValue = (flag, fallback) => {
@@ -26,9 +26,13 @@ const argValue = (flag, fallback) => {
 };
 
 const deviceHosts = Object.fromEntries((registry.devices || []).map((d) => [d.id, d.hostname]));
-const targetHost = argValue("--host", deviceHosts[config.deployDevice] || registry.defaultHost);
-const targetPort = Number(argValue("--port", config.httpsPort));
-const insecure = args.includes("--insecure") || config.tlsMode === "internal";
+// proxyMode "caddy": test the (not yet public) Caddy container on the NAS.
+// proxyMode "dsm" (or any hand-managed proxy): test each domain's PUBLIC
+// endpoint — DNS resolves the host, port 443, real cert verification.
+const isDsmMode = config.proxyMode === "dsm";
+const targetHost = argValue("--host", isDsmMode ? null : deviceHosts[config.deployDevice] || registry.defaultHost);
+const targetPort = Number(argValue("--port", isDsmMode ? 443 : config.httpsPort));
+const insecure = args.includes("--insecure") || (!isDsmMode && config.tlsMode === "internal");
 const timeoutMs = 10_000;
 
 const sites = registry.projects
@@ -42,7 +46,8 @@ for (const extra of config.extraSites || []) {
 function rawTlsRequest(domain, requestLines) {
   return new Promise((resolve, reject) => {
     const socket = tls.connect(
-      { host: targetHost, port: targetPort, servername: domain, rejectUnauthorized: !insecure },
+      // targetHost null (dsm mode) → connect to the domain itself via DNS
+      { host: targetHost || domain, port: targetPort, servername: domain, rejectUnauthorized: !insecure },
       () => socket.write(requestLines.join("\r\n") + "\r\n\r\n"),
     );
     let response = "";
@@ -87,7 +92,7 @@ async function checkWebSocket({ domain, path: wsPath }) {
 }
 
 async function main() {
-  console.log(`Preflight against ${targetHost}:${targetPort} (insecure=${insecure}) — ${sites.length} sites\n`);
+  console.log(`Preflight against ${targetHost || "each domain's public endpoint"}:${targetPort} (proxyMode=${config.proxyMode || "caddy"}, insecure=${insecure}) — ${sites.length} sites\n`);
   let failures = 0;
 
   for (const site of sites) {

@@ -12,9 +12,31 @@ DNS dry-runs all work without deploying anything.
 
 ## Pieces
 
+## Settings — projects.json is the source of truth
+
+Settings resolve in two layers via `edge-config.js`:
+
+1. `edge/edge.config.json` — committed **defaults / template** (shareable;
+   what someone cloning these repos starts from).
+2. `vault-service/projects.json → "edge": { ... }` — **your** values; any key
+   here overrides the default and wins everywhere (all scripts read through
+   the loader). No registry present → defaults alone apply.
+
+Example (current live state — DSM is still the proxy today):
+
+```jsonc
+// projects.json
+"edge": { "proxyMode": "dsm" }
+```
+
+At cutover, the registry flips to `{ "proxyMode": "caddy", "enabled": true,
+"tlsMode": "auto" }` — the committed defaults never need editing.
+
+## Pieces
+
 | File | Purpose |
 | --- | --- |
-| `edge.config.json` | Settings — DNS provider, TLS mode, ports, anchor record, extra sites. Committed; secrets stay in env/vault. |
+| `edge.config.json` + `edge-config.js` | Layered settings (see above). Committed; secrets stay in env/vault. |
 | `generate-caddyfile.js` | registry + config → `generated/Caddyfile` |
 | `preflight.js` | Per-domain TLS + healthPath check **plus real WebSocket 101 upgrade assertions** through the proxy |
 | `dns/provider.js` | Pluggable DNS provider interface + loader (secrets via env → vault) |
@@ -47,6 +69,21 @@ npm run edge:dns:check       # DNS reconcile dry-run report
 npm run edge:dns:apply       # create missing records (requires enabled:true)
 npm run edge:deploy          # full pipeline (requires enabled:true)
 ```
+
+## Keeping Synology's reverse proxy instead
+
+Set `"proxyMode": "dsm"` — the module then never generates or deploys Caddy,
+and the rest keeps working *against your DSM proxy*:
+
+- `edge:dns:check` / `edge:dns:apply` and `ddns-update.js` — DNS automation
+  is proxy-agnostic (it only needs the registry + a DNS provider).
+- `edge:preflight` — connects to each domain's **public** endpoint (real DNS,
+  port 443, real cert verification) and asserts health **and WebSocket
+  upgrades** through whatever proxy you run. If a DSM rule is missing its
+  WebSocket headers, preflight fails loudly instead of the app failing
+  silently — run it after every rule you add.
+
+You keep clicking rules into DSM by hand; the module verifies them.
 
 ## Cutover runbook (when ready)
 

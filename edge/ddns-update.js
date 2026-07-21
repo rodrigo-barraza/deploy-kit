@@ -11,7 +11,7 @@ const path = require("path");
 const { loadProvider, zoneForDomain } = require("./dns/provider.js");
 
 const EDGE_DIR = __dirname;
-const config = JSON.parse(fs.readFileSync(path.join(EDGE_DIR, "edge.config.json"), "utf8"));
+const config = require("./edge-config.js").loadEdgeConfig();
 
 async function main() {
   const provider = loadProvider(config.dnsProvider);

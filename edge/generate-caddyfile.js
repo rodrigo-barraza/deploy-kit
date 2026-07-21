@@ -18,12 +18,12 @@ const { loadProvider } = require("./dns/provider.js");
 const EDGE_DIR = __dirname;
 const ROOT_DIR = path.join(EDGE_DIR, "..", "..");
 const PROJECTS_JSON = path.join(ROOT_DIR, "vault-service", "projects.json");
-const CONFIG_PATH = path.join(EDGE_DIR, "edge.config.json");
+const { loadEdgeConfig } = require("./edge-config.js");
 const OUTPUT_PATH = path.join(EDGE_DIR, "generated", "Caddyfile");
 
 function loadSites() {
   const registry = JSON.parse(fs.readFileSync(PROJECTS_JSON, "utf8"));
-  const config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+  const config = loadEdgeConfig();
 
   const deviceHosts = {};
   for (const device of registry.devices || []) {
@@ -97,6 +97,13 @@ function render(sites, config) {
 
 function main() {
   const { sites, config } = loadSites();
+  if ((config.proxyMode || "caddy") !== "caddy") {
+    console.log(
+      `proxyMode is "${config.proxyMode}" — this setup keeps its own reverse proxy, ` +
+        `so there is no Caddyfile to generate. (edge:dns:* and edge:preflight still apply.)`,
+    );
+    return;
+  }
   const caddyfile = render(sites, config);
   fs.mkdirSync(path.dirname(OUTPUT_PATH), { recursive: true });
   fs.writeFileSync(OUTPUT_PATH, caddyfile);

@@ -20,19 +20,23 @@ Settings resolve in two layers via `edge-config.js`:
    here overrides the default and wins everywhere (all scripts read through
    the loader). No registry present → defaults alone apply.
 
-Example (current live state — DSM is still the proxy today):
+Everything that identifies YOUR deployment — `dnsProvider`, `anchorRecord`,
+`wsChecks`, `publicIp`, `extraSites`, `zoneProviders` — belongs in the
+registry layer, never in the committed defaults (the defaults ship with DNS
+automation off and no anchor, so a fresh clone is inert until configured).
 
 ```jsonc
 // projects.json
 "edge": {
-  "proxyMode": "dsm",
-  "publicIp": "216.19.178.138",          // static IP declared; "auto" = dynamic
-  "zoneProviders": { "clankerbox.com": "cloudflare" }
+  "proxyMode": "caddy",
+  "enabled": true,
+  "tlsMode": "auto",
+  "dnsProvider": "porkbun",
+  "anchorRecord": "home.example.com",    // your DDNS anchor A record
+  "publicIp": "auto",                    // or declare a static IP
+  "zoneProviders": { "some-zone.com": "cloudflare" }
 }
 ```
-
-At cutover, the registry flips to `{ "proxyMode": "caddy", "enabled": true,
-"tlsMode": "auto" }` — the committed defaults never need editing.
 
 ## Pieces
 
@@ -43,7 +47,7 @@ At cutover, the registry flips to `{ "proxyMode": "caddy", "enabled": true,
 | `preflight.js` | Per-domain TLS + healthPath check **plus real WebSocket 101 upgrade assertions** through the proxy |
 | `dns/provider.js` | Pluggable DNS provider interface + loader (secrets via env → vault) |
 | `dns/porkbun.js`, `dns/cloudflare.js`, `dns/none.js` | Implementations. Add your registrar as `dns/<name>.js`; map exception zones via `zoneProviders` |
-| `reconcile-dns.js` + `dns-ownership.json` | Full DNS reconciler: creates missing records, prunes ones the ownership manifest proves are managed when they leave the registry. Records it cannot prove it owns (MX/TXT/hand-made) are never touched — conflicts are reported, not resolved |
+| `reconcile-dns.js` + `dns-ownership.json` | Full DNS reconciler: creates missing records, prunes ones the ownership manifest proves are managed when they leave the registry. Records it cannot prove it owns (MX/TXT/hand-made) are never touched — conflicts are reported, not resolved. The manifest is local per-deployment state (gitignored) |
 | `ddns-update.js` | Cron-able: repoints ALL managed A records (anchor + foreign zones) when the public IP changes |
 | `Dockerfile` / `docker-compose.yml` | Caddy built with the configured provider's DNS plugin (build arg) |
 | `deploy-edge.sh` | build → ship → up → hot reload → preflight (gated on `enabled`) |
@@ -108,13 +112,14 @@ anchor. Implemented: `porkbun`, `cloudflare` (scoped token, Zone→DNS→Edit).
 steps: DNS reconcile (`--apply`) then route sync + hot reload. Add a project
 with a `domain` to the registry and deploy — DNS record, route, and cert all
 materialize; remove it and its DNS record is pruned (only if the ownership
-manifest proves this tool manages it — see `dns-ownership.json`, committed).
+manifest proves this tool manages it — see `dns-ownership.json`, local and
+gitignored; adoption rebuilds it if lost).
 
 ## Cutover runbook (when ready)
 
 1. Vault/env: add the DNS provider keys; create `<composeDir>/.env` on the NAS.
 2. `npm run edge:dns:check` → review → `npm run edge:dns:apply` (creates the
-   `home.rod.dev` anchor + missing CNAMEs; touches nothing pre-existing).
+   `anchorRecord` A record + missing CNAMEs; touches nothing pre-existing).
 3. Set `"tlsMode": "auto"` and `"enabled": true` → `npm run edge:deploy`.
    DNS-01 issues real certs **before** any public traffic reaches Caddy.
 4. `npm run edge:preflight` — every domain must pass, including WS upgrades.

@@ -15,7 +15,9 @@
 // Desired hostnames whose records pre-exist are ADOPTED into the manifest
 // (they become managed from then on). Anything else — MX, TXT, SPF,
 // verification records, hand-made entries pointing anywhere else — is
-// invisible to deletion, forever. Manifest lost → nothing is deletable.
+// invisible to deletion, forever. Manifest lost → nothing is deletable,
+// and adoption rebuilds it on the next run. The manifest is LOCAL state
+// (gitignored) — it describes one deployment's DNS, not the repo's.
 //
 // Usage:
 //   node edge/reconcile-dns.js            # dry-run (always, when enabled:false)
@@ -40,7 +42,7 @@ function loadManifest() {
   try {
     return JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
   } catch {
-    return { $comment: "Hostnames managed by edge/reconcile-dns.js — ONLY names listed here are ever deletable. Committed so ownership survives machines.", records: {} };
+    return { $comment: "Hostnames managed by edge/reconcile-dns.js — ONLY names listed here are ever deletable. Local per-deployment state (gitignored); rebuilt by adoption if lost.", records: {} };
   }
 }
 
@@ -52,8 +54,12 @@ function matchesManagedShape(record, anchor, publicIp) {
 }
 
 async function main() {
+  if (config.dnsProvider === "none" && !Object.keys(config.zoneProviders || {}).length) {
+    console.log("dnsProvider is \"none\" — DNS automation is off, nothing to reconcile. Set dnsProvider (and anchorRecord) in your registry's \"edge\" block to enable it.");
+    return;
+  }
   const anchor = config.anchorRecord;
-  if (!anchor) throw new Error("edge config anchorRecord is required for DNS reconciliation");
+  if (!anchor) throw new Error("edge config anchorRecord is required for DNS reconciliation — set it in your registry's \"edge\" block");
 
   const domains = registry.projects
     .filter((p) => p.visibility === "external" && p.domain)
@@ -87,6 +93,10 @@ async function main() {
 
   for (const zone of allZones) {
     const provider = providerForZone(zone, config);
+    if (provider.name === "none") {
+      console.log(`zone ${zone}: provider "none" — skipped (DNS automation off for this zone)`);
+      continue;
+    }
     let records;
     try {
       records = await provider.listRecords(zone);

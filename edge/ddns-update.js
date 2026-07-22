@@ -22,8 +22,11 @@ const registry = JSON.parse(fs.readFileSync(process.env.PROJECTS_JSON_PATH || pa
 const config = require("./edge-config.js").loadEdgeConfig();
 
 async function main() {
+  if (config.dnsProvider === "none" && !Object.keys(config.zoneProviders || {}).length) {
+    return; // DNS automation off — nothing to keep pointed
+  }
   const anchor = config.anchorRecord;
-  if (!anchor) throw new Error("edge config anchorRecord is required");
+  if (!anchor) throw new Error("edge config anchorRecord is required — set it in your registry's \"edge\" block");
 
   const domains = registry.projects
     .filter((p) => p.visibility === "external" && p.domain)

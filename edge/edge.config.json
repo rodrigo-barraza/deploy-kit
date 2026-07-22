@@ -4,8 +4,8 @@
   "$enabled": "Master switch. While false, deploy-edge.sh refuses to ship anything — generate/preflight/reconcile still work (reconcile stays dry-run).",
   "proxyMode": "caddy",
   "$proxyMode": "'caddy' = the managed container this module deploys. 'dsm' = keep Synology's (or any other hand-managed) reverse proxy: Caddyfile generation and deploy stand down, but DNS reconciliation, DDNS, and preflight verification all still run — preflight then connects to each domain's public endpoint (port 443) and asserts health + WebSocket upgrades against YOUR proxy.",
-  "dnsProvider": "porkbun",
-  "$dnsProvider": "DEFAULT provider: any module in edge/dns/ ('porkbun', 'cloudflare', 'none', ...). 'none' disables DNS automation and DNS-01 certs — Caddy then uses HTTP-01, which requires public port 80. Add a provider by dropping a module in edge/dns/ that implements the interface in edge/dns/provider.js.",
+  "dnsProvider": "none",
+  "$dnsProvider": "DEFAULT provider: any module in edge/dns/ ('porkbun', 'cloudflare', 'none', ...). 'none' disables DNS automation and DNS-01 certs — Caddy then uses HTTP-01, which requires public port 80. Add a provider by dropping a module in edge/dns/ that implements the interface in edge/dns/provider.js. Set YOUR provider in the registry's \"edge\" block, not here — this file is committed and shared by every deploy-kit user.",
   "zoneProviders": {},
   "$zoneProviders": "Per-zone provider overrides for domains at OTHER registrars, e.g. { \"clankerbox.com\": \"cloudflare\" }. Reconciliation, DDNS, and DNS-01 cert challenges all use the zone's own provider; the Caddy image compiles every needed plugin.",
   "tlsMode": "internal",
@@ -18,17 +18,12 @@
   "publicIp": "auto",
   "$publicIp": "'auto' = dynamic connection: detect the egress IP each run and DDNS repoints records when it drifts (schedule ddns-update.js). An explicit IP = static connection: the declared value is the source of truth — records are enforced to it, DDNS scheduling becomes optional insurance, and a loud warning fires if the actual egress IP ever disagrees with the declaration.",
 
-  "anchorRecord": "home.rod.dev",
-  "$anchorRecord": "Single A record the reconciler points at the current public IP; every other managed hostname becomes CNAME/ALIAS → anchor. An ISP IP change is then one ddns-update call.",
+  "anchorRecord": null,
+  "$anchorRecord": "Single A record the reconciler points at the current public IP (e.g. \"home.example.com\"); every other managed hostname becomes CNAME/ALIAS → anchor. An ISP IP change is then one ddns-update call. Per-deployment — set it in the registry's \"edge\" block.",
   "zoneOverrides": {},
   "$zoneOverrides": "Map domain → DNS zone for cases the default 'last two labels' heuristic gets wrong (e.g. \"foo.co.uk\": \"foo.co.uk\").",
   "extraSites": [],
   "$extraSites": "Routes for things NOT in the registry (DSM apps etc.): [{ \"domain\": \"nas.rod.dev\", \"upstream\": \"192.168.86.2:5001\" }]",
-  "wsChecks": [
-    {
-      "domain": "api.prism.rod.dev",
-      "path": "/ws/chat?project=any&username=preflight"
-    }
-  ],
-  "$wsChecks": "Preflight asserts a real WebSocket 101 upgrade through the proxy for these — the exact failure class the DSM proxy silently caused."
+  "wsChecks": [],
+  "$wsChecks": "Preflight asserts a real WebSocket 101 upgrade through the proxy for these — the exact failure class a stripping reverse proxy silently causes. Per-deployment (set in the registry's \"edge\" block): [{ \"domain\": \"api.chat.example.com\", \"path\": \"/ws\" }]"
 }

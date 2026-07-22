@@ -77,18 +77,22 @@ function providerForZone(zone, config) {
 
 /**
  * The record plan shared by reconcile-dns.js (create missing) and
- * ddns-update.js (repoint stale A records on IP change):
+ * ddns-update.js (repoint stale A records on IP change).
+ *
+ * With an anchor (anchorRecord set):
  *   anchor + zone apexes + anything outside the anchor's zone → A record @ public IP
  *   subdomains inside the anchor's zone → CNAME → anchor
+ * Without an anchor (anchorRecord null): every domain → A record @ public IP
+ * (simpler; DDNS then rewrites each one on an IP change instead of just the anchor).
  */
 function planRecords(domains, anchor, config) {
   const zoneOverrides = config.zoneOverrides || {};
-  const anchorZone = zoneForDomain(anchor, zoneOverrides);
+  const anchorZone = anchor ? zoneForDomain(anchor, zoneOverrides) : null;
   const plan = [];
-  for (const domain of new Set([anchor, ...domains])) {
+  for (const domain of new Set([...(anchor ? [anchor] : []), ...domains])) {
     const zone = zoneForDomain(domain, zoneOverrides);
     const name = domain === zone ? "" : domain.slice(0, -(zone.length + 1));
-    const isARecord = domain === anchor || name === "" || zone !== anchorZone;
+    const isARecord = !anchor || domain === anchor || name === "" || zone !== anchorZone;
     plan.push({
       domain,
       zone,

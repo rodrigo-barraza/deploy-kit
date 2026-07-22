@@ -22,16 +22,20 @@ const registry = JSON.parse(fs.readFileSync(process.env.PROJECTS_JSON_PATH || pa
 const config = require("./edge-config.js").loadEdgeConfig();
 
 async function main() {
-  if (config.dnsProvider === "none" && !Object.keys(config.zoneProviders || {}).length) {
-    return; // DNS automation off — nothing to keep pointed
-  }
-  const anchor = config.anchorRecord;
-  if (!anchor) throw new Error("edge config anchorRecord is required — set it in your registry's \"edge\" block");
-
   const domains = registry.projects
     .filter((p) => p.visibility === "external" && p.domain)
     .map((p) => p.domain)
     .concat((config.extraSites || []).map((s) => s.domain));
+
+  if (!domains.length && !config.anchorRecord) {
+    return; // nothing managed — unconfigured clone stays a quiet no-op
+  }
+  if (config.dnsProvider === "none" && !Object.keys(config.zoneProviders || {}).length) {
+    return; // DNS automation off — nothing to keep pointed
+  }
+  // Optional anchor: without one, every managed record is an A record and
+  // gets rewritten here on an IP change (instead of just the anchor).
+  const anchor = config.anchorRecord || null;
 
   const aRecordPlan = planRecords(domains, anchor, config).filter((e) => e.contentKind === "publicIp");
   const { ip: publicIp } = await resolvePublicIp(

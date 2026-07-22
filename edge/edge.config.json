@@ -19,7 +19,7 @@
   "$publicIp": "'auto' = dynamic connection: detect the egress IP each run and DDNS repoints records when it drifts (schedule ddns-update.js). An explicit IP = static connection: the declared value is the source of truth — records are enforced to it, DDNS scheduling becomes optional insurance, and a loud warning fires if the actual egress IP ever disagrees with the declaration.",
 
   "anchorRecord": null,
-  "$anchorRecord": "Single A record the reconciler points at the current public IP (e.g. \"home.example.com\"); every other managed hostname becomes CNAME/ALIAS → anchor. An ISP IP change is then one ddns-update call. Per-deployment — set it in the registry's \"edge\" block.",
+  "$anchorRecord": "OPTIONAL. Set (e.g. \"home.example.com\"): single A record the reconciler points at the current public IP; every other managed hostname in its zone becomes CNAME → anchor, so an ISP IP change is one ddns-update write. Unset (null): every managed domain gets its own direct A record and ddns-update rewrites each on an IP change — simpler, fine for a few domains. Per-deployment — set it in the registry's \"edge\" block.",
   "zoneOverrides": {},
   "$zoneOverrides": "Map domain → DNS zone for cases the default 'last two labels' heuristic gets wrong (e.g. \"foo.co.uk\": \"foo.co.uk\").",
   "extraSites": [],

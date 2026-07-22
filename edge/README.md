@@ -32,7 +32,10 @@ automation off and no anchor, so a fresh clone is inert until configured).
   "enabled": true,
   "tlsMode": "auto",
   "dnsProvider": "porkbun",
-  "anchorRecord": "home.example.com",    // your DDNS anchor A record
+  "anchorRecord": "home.example.com",    // OPTIONAL anchor: subdomains CNAME to it, so an
+                                         // IP change = 1 DNS write. Omit it and every domain
+                                         // gets a direct A record instead (each rewritten by
+                                         // ddns-update on IP change — fine for a few domains)
   "publicIp": "auto",                    // or declare a static IP
   "zoneProviders": { "some-zone.com": "cloudflare" }
 }

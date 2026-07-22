@@ -29,7 +29,7 @@ function loadEdgeConfig() {
   let overrides = {};
   try {
     const registry = JSON.parse(fs.readFileSync(PROJECTS_JSON, "utf8"));
-    overrides = registry.edge || {};
+    overrides = stripComments(registry.edge || {});
   } catch {
     // No registry (external user without a vault) — defaults alone apply.
   }

@@ -54,17 +54,25 @@ function matchesManagedShape(record, anchor, publicIp) {
 }
 
 async function main() {
-  if (config.dnsProvider === "none" && !Object.keys(config.zoneProviders || {}).length) {
-    console.log("dnsProvider is \"none\" — DNS automation is off, nothing to reconcile. Set dnsProvider (and anchorRecord) in your registry's \"edge\" block to enable it.");
-    return;
-  }
-  const anchor = config.anchorRecord;
-  if (!anchor) throw new Error("edge config anchorRecord is required for DNS reconciliation — set it in your registry's \"edge\" block");
-
   const domains = registry.projects
     .filter((p) => p.visibility === "external" && p.domain)
     .map((p) => p.domain)
     .concat((config.extraSites || []).map((s) => s.domain));
+  const manifest = loadManifest();
+
+  // Nothing desired, nothing owned → nothing to reconcile. Bail before any
+  // config demands so an unconfigured clone stays a quiet no-op.
+  if (!domains.length && !Object.keys(manifest.records).length) {
+    console.log("Registry has no external domains and the ownership manifest is empty — nothing to reconcile. (Projects with visibility:\"external\" + domain, or extraSites, opt into DNS management.)");
+    return;
+  }
+  if (config.dnsProvider === "none" && !Object.keys(config.zoneProviders || {}).length) {
+    console.log("dnsProvider is \"none\" — DNS automation is off, nothing to reconcile. Set dnsProvider (and anchorRecord) in your registry's \"edge\" block to enable it.");
+    return;
+  }
+  // anchorRecord is optional: set → subdomains CNAME to it (one write per IP
+  // change); unset → every domain gets a direct A record (DDNS rewrites each).
+  const anchor = config.anchorRecord || null;
 
   const plan = planRecords(domains, anchor, config);
   const desiredByZone = new Map();
@@ -73,7 +81,6 @@ async function main() {
     desiredByZone.get(entry.zone).push(entry);
   }
 
-  const manifest = loadManifest();
   const desiredDomains = new Set(plan.map((e) => e.domain));
 
   // Zones to visit: every desired zone PLUS zones of manifest entries that
@@ -87,7 +94,7 @@ async function main() {
     config,
     providerForZone("", { ...config, zoneProviders: {} }),
   );
-  console.log(`Public IP: ${publicIp} (${ipMode}) | anchor: ${anchor} | mode: ${apply ? "APPLY" : "dry-run"}\n`);
+  console.log(`Public IP: ${publicIp} (${ipMode}) | anchor: ${anchor || "none (direct A records)"} | mode: ${apply ? "APPLY" : "dry-run"}\n`);
 
   let created = 0, ok = 0, adopted = 0, pruned = 0, conflicts = 0;
 

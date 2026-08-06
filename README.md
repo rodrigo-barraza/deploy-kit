@@ -33,6 +33,9 @@ npm run deploy:changed
 
 # Deploy only changed services, skipping dependency checks
 npm run deploy:changed:no-deps
+
+# Deploy every changed project without running its tests
+npm run deploy:changed-all:no-tests
 ```
 
 ### Group Deploy
@@ -78,6 +81,7 @@ npm run deploy -- --skip=lupos-bot,lights-service
 |---|---|
 | `--dry-run` | Validate only, no changes |
 | `--skip-pull` | Skip git pull |
+| `--skip-tests` | Skip each repo's test suite — **deploys untested code** (also `SKIP_TESTS=true`) |
 | `--no-cache` | Rebuild images from scratch |
 | `--no-parallel` | Disable parallel builds |
 | `--changed-only` | Only build+deploy services with git changes |

@@ -21,6 +21,7 @@
 #   npm run deploy                         # full deploy
 #   npm run deploy -- --dry-run            # validate only
 #   npm run deploy -- --skip-pull          # skip git pull
+#   npm run deploy -- --skip-tests         # skip each repo's test suite (deploys UNTESTED code)
 #   npm run deploy -- --no-cache           # rebuild images from scratch
 #   npm run deploy -- --changed-only       # only build+deploy services with git changes
 #   npm run deploy -- --changed-all        # changed services, ignoring the TEMPORARY_SKIP list
@@ -246,6 +247,8 @@ DRY_RUN=false
 ANY_LIB_CHANGED=false
 export ANY_LIB_CHANGED
 SKIP_PULL=false
+# Honours SKIP_TESTS from the environment too, for a one-off run
+case "${SKIP_TESTS:-}" in 1|true|yes|on) SKIP_TESTS=true ;; *) SKIP_TESTS=false ;; esac
 IGNORE_TEMP_SKIP=false
 NO_CACHE=false
 NO_PARALLEL=false
@@ -269,6 +272,7 @@ for arg in "$@"; do
   case "$arg" in
     --dry-run)        DRY_RUN=true ;;
     --skip-pull)      SKIP_PULL=true ;;
+    --skip-tests)     SKIP_TESTS=true ;;
     --no-cache)       NO_CACHE=true ;;
     --no-parallel)    NO_PARALLEL=true ;;
     --changed-only)   CHANGED_ONLY=true ;;
@@ -556,9 +560,10 @@ has_changes() {
 # ── Build deploy flags ────────────────────────────────────────
 build_flags() {
   local flags=""
-  $DRY_RUN   && flags="$flags --dry-run"
-  $SKIP_PULL && flags="$flags --skip-pull"
-  $NO_CACHE  && flags="$flags --no-cache"
+  $DRY_RUN    && flags="$flags --dry-run"
+  $SKIP_PULL  && flags="$flags --skip-pull"
+  $SKIP_TESTS && flags="$flags --skip-tests"
+  $NO_CACHE   && flags="$flags --no-cache"
   echo "$flags"
 }
 
@@ -1158,6 +1163,9 @@ if $CHANGED_ONLY; then
 fi
 if $SKIP_DEPS; then
   printf '  %sMode: skip-deps (skipping library sync and dependency change checks)%s\n' "$CYAN" "$RESET"
+fi
+if $SKIP_TESTS; then
+  printf '%s%s  ⚠  SKIP TESTS — untested code will be built and deployed%s\n' "$YELLOW" "$BOLD" "$RESET"
 fi
 if $BUILD_ONLY; then
   printf '%s%s  ⚠  BUILD ONLY — no transfer or restart will be performed%s\n' "$YELLOW" "$BOLD" "$RESET"

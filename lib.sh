@@ -109,11 +109,15 @@ BUILD_ONLY=false
 DEPLOY_ONLY=false
 TRANSFER_ONLY=false
 RESTART_ONLY=false
+# Also honours SKIP_TESTS from the environment, so a one-off run can skip
+# tests without editing anything: SKIP_TESTS=true npm run deploy:changed-all
+case "${SKIP_TESTS:-}" in 1|true|yes|on) SKIP_TESTS=true ;; *) SKIP_TESTS=false ;; esac
 
 for arg in "$@"; do
   case "$arg" in
     --dry-run)        DRY_RUN=true ;;
     --skip-pull)      SKIP_PULL=true ;;
+    --skip-tests)     SKIP_TESTS=true ;;
     --no-cache)       NO_CACHE="--no-cache" ;;
     --build-only)     BUILD_ONLY=true ;;
     --deploy-only)    DEPLOY_ONLY=true ;;
@@ -286,7 +290,10 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
   fi
 
   # ── 1.6 Run Tests ───────────────────────────────────────────
-  if grep -q '"test":' package.json 2>/dev/null; then
+  if $SKIP_TESTS; then
+    step "Running Tests"
+    warn "Skipped — deploying UNTESTED code (--skip-tests)"
+  elif grep -q '"test":' package.json 2>/dev/null; then
     # Call optional pre-test hook (e.g. to run a host build if tests depend on dist/)
     if type PRE_TEST &>/dev/null; then
       PRE_TEST

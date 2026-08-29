@@ -133,6 +133,16 @@ Services with special needs define functions before sourcing:
 | `EXTRA_SSH_SYNC()` | Sync extra files during SSH deploy | vault, rod-dev |
 | `EXTRA_SMB_SYNC()` | Sync extra files during SMB fallback | vault |
 
+## Hand steps the kit does not do
+
+The registry has one `port` per project and the edge generator emits HTTP
+only, so anything that is not an HTTP port is a hand step on the router —
+recorded here so a fresh NAS or a replaced router does not silently lose it.
+
+| Service | Step | Proof |
+|---|---|---|
+| `games-service` | Forward **UDP 5611** from the router to the NAS — the proximity-voice relay and the presence datagrams that ride it (`docker-compose.yml` publishes `5611:5611/udp`; Caddy carries none of it). Missing, every player on a shared ranch sees 📵. | In `games-service`: `node tests/live/relay-echo.mjs https://api.games.rod.dev` — its README → Deploying |
+
 ## Config Variables
 
 | Variable | Required | Default | Description |

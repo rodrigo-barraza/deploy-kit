@@ -61,7 +61,8 @@
     "edge:dns:check": "node edge/reconcile-dns.js",
     "edge:dns:apply": "node edge/reconcile-dns.js --apply",
     "edge:deploy": "bash edge/deploy-edge.sh",
-    "edge:sync": "bash edge/sync-config.sh"
+    "edge:sync": "bash edge/sync-config.sh",
+    "test": "python3 -m unittest discover -s tests -p test_deploy.py -v"
   },
   "packageManager": "pnpm@11.8.0"
 }

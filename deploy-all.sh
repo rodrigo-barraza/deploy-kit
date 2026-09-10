@@ -2,7 +2,7 @@
 # ============================================================
 # Deploy All Services
 #
-# Three-phase pipeline:
+# Deployment pipeline:
 #   Phase 1 — BUILD + TRANSFER: all services build in parallel.
 #             As each build completes, its image transfer to the
 #             target device starts immediately (pipeline parallelism).
@@ -26,7 +26,7 @@
 #   npm run deploy -- --changed-only       # only build+deploy services with git changes
 #   npm run deploy -- --changed-all        # changed services, ignoring the TEMPORARY_SKIP list
 #   npm run deploy -- --ignore-temp-skip   # disable the TEMPORARY_SKIP list for this run
-#   npm run deploy -- --skip-deps          # skip library build and dependency change checks
+#   npm run deploy -- --skip-deps          # skip library synchronization and dependency change checks
 #   npm run deploy -- --no-impact          # disable symbol-level library impact analysis
 #                                            (fall back to "any lib commit rebuilds all consumers")
 #   npm run deploy -- --build-only         # build Docker images only (no transfer/restart)
@@ -45,1707 +45,671 @@
 # ============================================================
 
 set -euo pipefail
-
-# Clean up semaphore FIFO and play completion earcons (auditory notifications) on exit
-MAIN_PID=$BASHPID
-cleanup() {
-  # Capture exit code IMMEDIATELY — before any conditional clobbers $?
-  local exit_code=$?
-
-  # Only execute in the main script process to avoid subshell duplicate notifications
-  if [ "${BASHPID:-}" = "${MAIN_PID:-}" ]; then
-    
-    # Close semaphore file descriptors
-    exec 7>&- 2>/dev/null || true
-    exec 8>&- 2>/dev/null || true
-    
-    # Clean up FIFOs, health files, and PIDs
-    rm -f "${LOG_DIR:-.deploy-logs}/.build-semaphore" 2>/dev/null || true
-    rm -f "${LOG_DIR:-.deploy-logs}/.ssh-semaphore" 2>/dev/null || true
-    rm -rf "${LOG_DIR:-.deploy-logs}"/.health-* 2>/dev/null || true
-    rm -f "${LOG_DIR:-.deploy-logs}"/*.pid 2>/dev/null || true
-
-
-    # Play completion sound if not in a dry-run (and not user-cancelled)
-    if [ "${DRY_RUN:-false}" = "false" ] && [ "${INTERRUPTED:-false}" = "false" ]; then
-      local has_unhealthy=false
-      if ls "${LOG_DIR:-.deploy-logs}"/*.health.status >/dev/null 2>&1; then
-        if grep -q "UNHEALTHY" "${LOG_DIR:-.deploy-logs}"/*.health.status 2>/dev/null; then
-          has_unhealthy=true
-        fi
-      fi
-
-      if [ "$exit_code" -eq 0 ] && [ "$has_unhealthy" = "false" ]; then
-        # Succeeded: play Tada chime
-        if command -v powershell.exe >/dev/null 2>&1; then
-          powershell.exe -Command "(New-Object Media.SoundPlayer 'C:\Windows\Media\tada.wav').PlaySync()" >/dev/null 2>&1 || true
-        fi
-      else
-        # Failed or Unhealthy: play Uh-Oh sound if available, otherwise Chord warning
-        local sound_dir="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-        local uhoh_wav="${sound_dir}/uhoh.wav"
-        if [ -f "$uhoh_wav" ] && command -v powershell.exe >/dev/null 2>&1; then
-          local win_path
-          win_path=$(wslpath -w "$uhoh_wav" 2>/dev/null || echo "")
-          if [ -n "$win_path" ]; then
-            powershell.exe -Command "(New-Object Media.SoundPlayer '$win_path').PlaySync()" >/dev/null 2>&1 || true
-          else
-            powershell.exe -Command "(New-Object Media.SoundPlayer 'C:\Windows\Media\chord.wav').PlaySync()" >/dev/null 2>&1 || true
-          fi
-        elif command -v powershell.exe >/dev/null 2>&1; then
-          powershell.exe -Command "(New-Object Media.SoundPlayer 'C:\Windows\Media\chord.wav').PlaySync()" >/dev/null 2>&1 || true
-        fi
-      fi
-    fi
-  fi
-}
-trap cleanup EXIT
-
-# ── Interrupt handling (Ctrl+C) ───────────────────────────────
-# Jobs launched with & in a non-interactive shell start with SIGINT
-# ignored (POSIX), so Ctrl+C kills only this main process and orphans
-# every build/transfer job — and their docker/pnpm children keep
-# running and printing to the terminal. SIGTERM is NOT ignored, so on
-# interrupt we TERM the entire process group to stop the pipeline.
-INTERRUPTED=false
-on_interrupt() {
-  trap '' INT TERM   # shield ourselves from the group-wide TERM below
-  INTERRUPTED=true
-  printf '\n  Interrupted — stopping all build/transfer jobs...\n' >&2
-  kill -TERM 0 2>/dev/null || true
-  wait 2>/dev/null || true
-  exit 130
-}
-trap on_interrupt INT TERM
-
-
-# ── Config ────────────────────────────────────────────────────
+if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
+  echo 'ERROR: deploy-all requires Bash 5.1 or newer (wait -n -p).' >&2
+  exit 2
+fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"   # sun/ parent directory
-LOG_DIR="${SCRIPT_DIR}/.deploy-logs"
-PROJECTS_JSON="${ROOT_DIR}/vault-service/projects.json"
-
-# ── SSH agent (for BuildKit --ssh default in docker build) ────
-# Child deploy.sh processes need SSH_AUTH_SOCK to forward the
-# agent into RUN --mount=type=ssh layers for private git deps.
-if [ -n "${SSH_AUTH_SOCK:-}" ]; then
-  ssh_status=0
-  ssh-add -l >/dev/null 2>&1 || ssh_status=$?
-  if [ $ssh_status -eq 2 ]; then
-    unset SSH_AUTH_SOCK
-  fi
-fi
-
-if [ -z "${SSH_AUTH_SOCK:-}" ]; then
-  eval "$(ssh-agent -s)" > /dev/null 2>&1
-  export SSH_AUTH_SOCK SSH_AGENT_PID
-fi
-if ! ssh-add -l > /dev/null 2>&1; then
-  ssh-add 2> /dev/null || true
-fi
-
-# ── Verify projects.json ──────────────────────────────────────
-if [ ! -f "$PROJECTS_JSON" ]; then
-  echo "ERROR: projects.json not found at ${PROJECTS_JSON}" >&2
-  exit 1
-fi
-
-# ── Dynamically load tiers from projects.json ─────────────────
-# Uses Node.js (always available) to parse JSON and emit bash-eval
-# assignments: MAX_TIER, TIER_SERVICES[n], TIER_<n> arrays,
-# and SVC_HEALTH_URL[id] for health-gating between tiers.
-ALL_SERVICES=()
-declare -A TIER_SERVICES  # tier -> space-separated service IDs
-declare -A SVC_HEALTH_URL # service-id -> health check URL
-declare -A SVC_DEPLOY_TARGET  # service-id -> device ID
-declare -A SVC_LIB_DEPS   # service-id -> space-separated library dependency IDs
-declare -A SVC_DEPS       # service-id -> space-separated all dependency IDs
-
-# Device metadata (populated from projects.json devices array)
-declare -A DEVICE_METHOD      # device-id -> ssh | docker-api
-declare -A DEVICE_HOSTNAME    # device-id -> IP/hostname
-declare -A DEVICE_ARCH        # device-id -> amd64 | arm64 (empty = host arch)
-declare -A DEVICE_SSH_ALIAS   # device-id -> SSH config alias
-declare -A DEVICE_DOCKER_BIN  # device-id -> path to docker binary
-declare -A DEVICE_DOCKER_API  # device-id -> tcp://host:port
-declare -A DEVICE_COMPOSE_ROOT # device-id -> remote compose dir root
-declare -A DEVICE_SMB_ROOT    # device-id -> SMB mount path
-
-eval "$(node "${SCRIPT_DIR}/scripts/parse-projects.js" "$PROJECTS_JSON" "$ROOT_DIR")"
-
-# Iterate tiers numerically — assoc-array key order is arbitrary,
-# and ALL_SERVICES ordering drives summary/log output.
-for s in $(seq 0 "$MAX_TIER"); do
-  for id in ${TIER_SERVICES[$s]:-}; do
-    ALL_SERVICES+=("$id")
-  done
-done
-
-# ── Colors & logging (shared) ─────────────────────────────────
 source "${SCRIPT_DIR}/colors.sh"
-
-# ── Box & rule helpers ────────────────────────────────────────
-# Padding is computed from character counts, so multibyte glyphs
-# (em dashes) no longer skew the right border.
-BOX_WIDTH=58
-box() {
-  local color="$1"; shift
-  local border line pad
-  printf -v border '%*s' "$BOX_WIDTH" ''
-  border=${border// /─}
-  printf '\n%s%s┌%s┐%s\n' "$color" "$BOLD" "$border" "$RESET"
-  for line in "$@"; do
-    pad=$(( BOX_WIDTH - 2 - ${#line} ))
-    [ "$pad" -lt 0 ] && pad=0
-    printf '%s%s│  %s%*s│%s\n' "$color" "$BOLD" "$line" "$pad" '' "$RESET"
-  done
-  printf '%s%s└%s┘%s\n' "$color" "$BOLD" "$border" "$RESET"
-}
-
-rule() {
-  local color="${1:-$MAGENTA}" border
-  printf -v border '%*s' 62 ''
-  border=${border// /═}
-  printf '%s%s%s%s\n' "$color" "$BOLD" "$border" "$RESET"
-}
-
-# ── Inline progress percentage ────────────────────────────────
-# Counts completed phase status files against a precomputed total
-# (PROGRESS_TOTAL, set after flag parsing). Sets PROGRESS_PCT to a
-# zero-padded string like "025%". Pure builtins — this runs once per
-# log line, so no forks and no per-service filter checks allowed here.
-PROGRESS_TOTAL=0
-progress_percentage() {
-  local completed=0 f
-  for f in "${LOG_DIR}"/*.build.status "${LOG_DIR}"/*.transfer.status "${LOG_DIR}"/*.deploy.status; do
-    [ -e "$f" ] && completed=$((completed + 1))
-  done
-  local percentage=0
-  [ "$PROGRESS_TOTAL" -gt 0 ] && percentage=$(( completed * 100 / PROGRESS_TOTAL ))
-  [ "$percentage" -gt 100 ] && percentage=100
-  printf -v PROGRESS_PCT '%03d%%' "$percentage"
-}
-
-# Override ts() to prepend elapsed seconds and progress percentage before
-# the timestamp. Uses printf's %()T builtin instead of $(date) — no fork.
-ts() {
-  progress_percentage
-  printf '%s%04ds %s %(%H:%M:%S)T%s' "$DIM" "$(( SECONDS - ${DEPLOY_START:-$SECONDS} ))" "$PROGRESS_PCT" -1 "$RESET"
-}
-
-
-# ── Service colors (semantic per-category shades) ────────────
-# Services=blue, Clients=green, Bots=yellow. Red is errors only.
-# Shades rotate within each category for visual differentiation.
-declare -A SVC_COLORS
-for svc in "${ALL_SERVICES[@]}"; do
-  SVC_COLORS[$svc]=$(svc_color "$svc")
-done
-
-# ── Flags ─────────────────────────────────────────────────────
-DRY_RUN=false
-ANY_LIB_CHANGED=false
-export ANY_LIB_CHANGED
-SKIP_PULL=false
-# Honours SKIP_TESTS from the environment too, for a one-off run
+source "${SCRIPT_DIR}/scripts/runtime.sh"
+die() { fail "$*"; exit 1; }
+DRY_RUN=false SKIP_PULL=false NO_CACHE=false NO_PARALLEL=false CHANGED_ONLY=false
+SKIP_DEPS=false NO_IMPACT=false BUILD_ONLY=false COMPACT_WSL=false IGNORE_TEMP_SKIP=false
+ONLY='' SKIP_LIST='' GROUP=''
 case "${SKIP_TESTS:-}" in 1|true|yes|on) SKIP_TESTS=true ;; *) SKIP_TESTS=false ;; esac
-IGNORE_TEMP_SKIP=false
-NO_CACHE=false
-NO_PARALLEL=false
-ONLY=""
-SKIP_LIST=""
-CHANGED_ONLY=false
-SKIP_DEPS=false
-NO_IMPACT=false
-BUILD_ONLY=false
-COMPACT_WSL=false
-GROUP=""
-MAX_CONCURRENT_BUILDS=6   # Limit concurrent docker builds to prevent CPU/IO and disk saturation
-# Detect WSL2 and automatically reduce builds to prevent CPU/IO starvation
-if grep -qi microsoft /proc/version 2>/dev/null; then
-  MAX_CONCURRENT_BUILDS=4
-fi
-export MAX_CONCURRENT_BUILDS
-MAX_CONCURRENT_SSH=8      # Subject to the target SSH server's MaxSessions limit (default: 10) even when multiplexed
-
+MAX_CONCURRENT_BUILDS=6
+if grep -qi microsoft /proc/version 2>/dev/null; then MAX_CONCURRENT_BUILDS=4; fi
+MAX_CONCURRENT_SSH="${MAX_CONCURRENT_SSH:-8}"
+BUILD_PHASE_TIMEOUT="${BUILD_PHASE_TIMEOUT:-1800}"
+TRANSFER_PHASE_TIMEOUT="${TRANSFER_PHASE_TIMEOUT:-600}"
+RESTART_PHASE_TIMEOUT="${RESTART_PHASE_TIMEOUT:-180}"
+REMOTE_TIMEOUT="${REMOTE_TIMEOUT:-30}"
+HEALTH_GATE_TIMEOUT="${HEALTH_GATE_TIMEOUT:-60}"
+HEALTH_GATE_INTERVAL="${HEALTH_GATE_INTERVAL:-3}"
+BUILD_CACHE_KEEP_STORAGE="${BUILD_CACHE_KEEP_STORAGE:-20GB}"
+BUILD_CACHE_MAX_AGE="${BUILD_CACHE_MAX_AGE:-}"
 for arg in "$@"; do
   case "$arg" in
-    --dry-run)        DRY_RUN=true ;;
-    --skip-pull)      SKIP_PULL=true ;;
-    --skip-tests)     SKIP_TESTS=true ;;
-    --no-cache)       NO_CACHE=true ;;
-    --no-parallel)    NO_PARALLEL=true ;;
-    --changed-only)   CHANGED_ONLY=true ;;
-    --ignore-temp-skip) IGNORE_TEMP_SKIP=true ;;
-    --changed-all)    CHANGED_ONLY=true; IGNORE_TEMP_SKIP=true ;;
-    --skip-deps)      SKIP_DEPS=true ;;
-    --no-impact)      NO_IMPACT=true ;;
-    --build-only)     BUILD_ONLY=true ;;
-    --compact-wsl)    COMPACT_WSL=true ;;
-    --only=*)         ONLY="${arg#--only=}" ;;
-    --skip=*)         SKIP_LIST="${arg#--skip=}" ;;
-    --group=*)        GROUP="${arg#--group=}" ;;
-    --clients)        GROUP="${GROUP:+${GROUP},}client" ;;
-    --services)       GROUP="${GROUP:+${GROUP},}service" ;;
-    --bots)           GROUP="${GROUP:+${GROUP},}bot" ;;
-    --vault)          GROUP="${GROUP:+${GROUP},}vault" ;;
-    --max-builds=*)   MAX_CONCURRENT_BUILDS="${arg#--max-builds=}" ;;
-
+    --dry-run) DRY_RUN=true ;; --skip-pull) SKIP_PULL=true ;; --skip-tests) SKIP_TESTS=true ;;
+    --no-cache) NO_CACHE=true ;; --no-parallel) NO_PARALLEL=true ;;
+    --changed-only) CHANGED_ONLY=true ;; --changed-all) CHANGED_ONLY=true; IGNORE_TEMP_SKIP=true ;;
+    --ignore-temp-skip) IGNORE_TEMP_SKIP=true ;; --skip-deps) SKIP_DEPS=true ;; --no-impact) NO_IMPACT=true ;;
+    --build-only) BUILD_ONLY=true ;; --compact-wsl) COMPACT_WSL=true ;;
+    --only=?*) ONLY="${arg#*=}" ;; --skip=?*) SKIP_LIST="${arg#*=}" ;;
+    --group=?*) GROUP="${GROUP:+${GROUP},}${arg#*=}" ;;
+    --clients) GROUP="${GROUP:+${GROUP},}client" ;; --services) GROUP="${GROUP:+${GROUP},}service" ;;
+    --bots) GROUP="${GROUP:+${GROUP},}bot" ;; --vault) GROUP="${GROUP:+${GROUP},}vault" ;;
+    --max-builds=*) MAX_CONCURRENT_BUILDS="${arg#*=}" ;;
+    --help|-h) sed -n '17,44s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    *) die "Unknown or empty option: ${arg}. Use --help." ;;
   esac
 done
-
-# ── TEMPORARY SKIP LIST (remove when these projects are ready) ─
-# These projects are temporarily excluded from full deploys.
-# To deploy them individually, use: npm run deploy -- --only=<service-id>
-# To deploy everything that changed regardless of this list, use:
-#   npm run deploy:changed-all   (or pass --ignore-temp-skip)
-TEMPORARY_SKIP="qbittorent-service,accounts-service,accounts-client,animals-service,animals-client,clankerbox-service,clankerbox-client,clock-crew-service,clock-crew-client,classic-whitemane-client,dygest-service,dygest-client,games-service,gauge-service,gauge-client,images-service,images-client,iron-service,iron-client,ledger-service,ledger-client,lights-client,lupos-client,meepothegeomancer-client,messages-service,messages-client,music-service,music-client,notes-service,notes-client,reels-service,reels-client,payments-service,payments-client"
-if [ "${IGNORE_TEMP_SKIP:-false}" != "true" ]; then
-  if [ -n "$SKIP_LIST" ]; then
-    SKIP_LIST="${SKIP_LIST},${TEMPORARY_SKIP}"
-  else
-    SKIP_LIST="$TEMPORARY_SKIP"
-  fi
-fi
-
-# ── Cross-arch preflight (QEMU binfmt) ────────────────────────
-# Only runs when at least one project targets a device whose arch
-# differs from this host. Installs the handler once up front so
-# parallel builds don't race the privileged installer container.
-# (binfmt registrations don't survive reboots, notably WSL2.)
-HOST_ARCH=$(uname -m)
-case "$HOST_ARCH" in
-  x86_64)        HOST_ARCH="amd64" ;;
-  aarch64|arm64) HOST_ARCH="arm64" ;;
-esac
-declare -A _FOREIGN_ARCHES=()
-for _svc in "${!SVC_DEPLOY_TARGET[@]}"; do
-  _arch="${DEVICE_ARCH[${SVC_DEPLOY_TARGET[$_svc]}]:-}"
-  if [ -n "$_arch" ] && [ "$_arch" != "$HOST_ARCH" ]; then
-    _FOREIGN_ARCHES[$_arch]=1
-  fi
+positive_integer --max-builds "$MAX_CONCURRENT_BUILDS" 64
+positive_integer MAX_CONCURRENT_SSH "$MAX_CONCURRENT_SSH" 64
+for setting in BUILD_PHASE_TIMEOUT TRANSFER_PHASE_TIMEOUT RESTART_PHASE_TIMEOUT REMOTE_TIMEOUT HEALTH_GATE_TIMEOUT HEALTH_GATE_INTERVAL; do
+  positive_integer "$setting" "${!setting}"
 done
-for _arch in "${!_FOREIGN_ARCHES[@]}"; do
-  case "$_arch" in
-    arm64) _handler="qemu-aarch64" ;;
-    amd64) _handler="qemu-x86_64" ;;
-    *)     _handler="qemu-${_arch}" ;;
-  esac
-  if [ ! -f "/proc/sys/fs/binfmt_misc/${_handler}" ] && ! $DRY_RUN; then
-    step "Installing QEMU binfmt handler for ${_arch} (cross-arch deploy target configured)"
-    docker run --privileged --rm tonistiigi/binfmt --install "$_arch" > /dev/null 2>&1 || true
-    if [ -f "/proc/sys/fs/binfmt_misc/${_handler}" ]; then
-      ok "binfmt handler ${_handler} installed"
+[[ "$BUILD_CACHE_KEEP_STORAGE" =~ ^[1-9][0-9]*(B|KB|MB|GB|TB)$ ]] || die 'Invalid BUILD_CACHE_KEEP_STORAGE (example: 20GB)'
+[[ -z "$BUILD_CACHE_MAX_AGE" || "$BUILD_CACHE_MAX_AGE" =~ ^[1-9][0-9]*(h|m|s)$ ]] || die 'Invalid BUILD_CACHE_MAX_AGE (example: 168h)'
+if $NO_PARALLEL; then MAX_CONCURRENT_BUILDS=1; MAX_CONCURRENT_SSH=1; fi
+export MAX_CONCURRENT_BUILDS
+export DEPLOY_SKIP_DEPS="$SKIP_DEPS"
+for command in node git flock timeout setsid; do command -v "$command" >/dev/null || die "Required command not found: $command"; done
+deploy_paths "$SCRIPT_DIR"
+PROJECTS_JSON="${PROJECTS_JSON_PATH:-${ROOT_DIR}/vault-service/projects.json}"
+export PROJECTS_JSON_PATH="$PROJECTS_JSON"
+[ -f "$PROJECTS_JSON" ] || die "projects.json not found: $PROJECTS_JSON"
+STATE_HELPER="${SCRIPT_DIR}/scripts/deploy-state.js"
+STATE_MODE=deployed
+$BUILD_ONLY && STATE_MODE=built
+DEPLOY_STATE_DIR="${DEPLOY_STATE_ROOT}/${STATE_MODE}"
+declare -A TIER_SERVICES=() SVC_HEALTH_URL=() SVC_DEPLOY_TARGET=() SVC_LIB_DEPS=() SVC_DEPS=()
+declare -A DEVICE_METHOD=() DEVICE_HOSTNAME=() DEVICE_ARCH=() DEVICE_SSH_ALIAS=() DEVICE_DOCKER_BIN=()
+declare -A DEVICE_DOCKER_API=() DEVICE_COMPOSE_ROOT=() DEVICE_SMB_ROOT=()
+ALL_SERVICES=() LIBRARY_IDS=() DOCKER_DEVICES=()
+load_projects() {
+  local data tier id
+  TIER_SERVICES=(); SVC_HEALTH_URL=(); SVC_DEPLOY_TARGET=(); SVC_LIB_DEPS=(); SVC_DEPS=()
+  DEVICE_METHOD=(); DEVICE_HOSTNAME=(); DEVICE_ARCH=(); DEVICE_SSH_ALIAS=(); DEVICE_DOCKER_BIN=()
+  DEVICE_DOCKER_API=(); DEVICE_COMPOSE_ROOT=(); DEVICE_SMB_ROOT=(); ALL_SERVICES=()
+  data=$(node "${SCRIPT_DIR}/scripts/parse-projects.js" "$PROJECTS_JSON" "$ROOT_DIR") || die 'Invalid project registry'
+  eval "$data"
+  for ((tier=0; tier<=MAX_TIER; tier++)); do
+    for id in ${TIER_SERVICES[$tier]:-}; do ALL_SERVICES+=("$id"); done
+  done
+}
+TEMPORARY_SKIP="qbittorrent-service,accounts-service,accounts-client,animals-service,animals-client,clankerbox-service,clankerbox-client,clock-crew-service,clock-crew-client,classic-whitemane-client,dygest-service,dygest-client,games-service,gauge-service,gauge-client,images-service,images-client,iron-service,iron-client,ledger-service,ledger-client,lights-client,lupos-client,meepothegeomancer-client,messages-service,messages-client,music-service,music-client,notes-service,notes-client,reels-service,reels-client,payments-service,payments-client"
+declare -A PHASE_STATUS=()
+declare -A SVC_SELECTED=() SVC_COLORS=() SVC_SHARED=() SVC_CHANGED=() NEEDS_BUILD=()
+validate_list() {
+  local name="$1" list="$2" item
+  [ -n "$list" ] || return 0
+  [[ "$list" != ,* && "$list" != *, && "$list" != *,,* ]] || die "Empty item in ${name}: $list"
+  local items=(); IFS=, read -ra items <<< "$list"
+  for item in "${items[@]}"; do
+    if [ "$name" = group ]; then
+      case "$item" in client|service|bot|vault) ;; *) die "Unknown group: $item" ;; esac
     else
-      fail "Cannot emulate ${_arch} on this host — binfmt install failed. Run manually: docker run --privileged --rm tonistiigi/binfmt --install ${_arch}"
-      exit 1
+      [ -n "${SVC_DEPLOY_TARGET[$item]:-}" ] || die "Unknown service in --${name}: $item"
+    fi
+  done
+}
+select_services() {
+  validate_list only "$ONLY"; validate_list skip "$SKIP_LIST"; validate_list group "$GROUP"
+  local svc cat group match count=0
+  local groups=(); IFS=, read -ra groups <<< "$GROUP"
+  for svc in "${ALL_SERVICES[@]}"; do
+    SVC_SELECTED[$svc]=0
+    [[ ",$SKIP_LIST," == *",$svc,"* ]] && continue
+    if [ -n "$ONLY" ]; then
+      [[ ",$ONLY," == *",$svc,"* ]] || continue
+    elif ! $IGNORE_TEMP_SKIP && [[ ",$TEMPORARY_SKIP," == *",$svc,"* ]]; then continue
+    fi
+    if [ -n "$GROUP" ]; then
+      cat=$(svc_category "$svc"); match=false
+      for group in "${groups[@]}"; do
+        case "$group" in
+          vault) [ "$svc" != vault-service ] || match=true ;;
+          service) { [ "$cat" != service ] || [ "$svc" = vault-service ]; } || match=true ;;
+          *) [ "$cat" != "$group" ] || match=true ;;
+        esac
+      done
+      $match || continue
+    fi
+    SVC_SELECTED[$svc]=1; count=$((count + 1))
+  done
+  [ "$count" -gt 0 ] || die 'No services selected; check --only, --skip, and groups.'
+}
+should_deploy() { [ "${SVC_SELECTED[$1]:-0}" = 1 ]; }
+load_projects
+select_services
+acquire_deploy_lock
+DEPLOY_START=$SECONDS
+INTERRUPTED=false DEPLOY_STARTED_AGENT=false
+LOG_DIR=''
+MAIN_COMMAND_PID=''
+declare -A JOB_SERVICE=() JOB_PHASE=() MIGRATION_STOPPED=() MIGRATION_SOURCES=()
+declare -A DEVICE_CONTAINERS=() DEVICE_REACHABLE=() IMPACT_VERDICT=() IMPACT_REASON=()
+IMPACT_SCRIPT_OK=false
+cleanup() {
+  local code=$? pid svc
+  trap '' INT TERM
+  if [ -n "$MAIN_COMMAND_PID" ]; then JOB_SERVICE[$MAIN_COMMAND_PID]=preparation; fi
+  # Kill only sessions created by this run, never the caller's process group.
+  if [ "${#JOB_SERVICE[@]}" -gt 0 ]; then terminate_deploy_sessions "${!JOB_SERVICE[@]}"; fi
+  for svc in "${!MIGRATION_STOPPED[@]}"; do rollback_migration "$svc" || true; done
+  if $DEPLOY_STARTED_AGENT; then ssh-agent -k >/dev/null 2>&1 || true; fi
+  if [ -n "$LOG_DIR" ]; then
+    printf '\nLogs: %s\n' "$LOG_DIR"
+    if $DRY_RUN; then info 'Dry run finished; persistent deployment state was not changed.'; fi
+  fi
+  if ! $DRY_RUN && ! $INTERRUPTED && command -v powershell.exe >/dev/null 2>&1; then
+    local sound='C:\Windows\Media\tada.wav'
+    [ "$code" -eq 0 ] || sound='C:\Windows\Media\chord.wav'
+    powershell.exe -NoProfile -Command "(New-Object Media.SoundPlayer '$sound').PlaySync()" >/dev/null 2>&1 || true
+  fi
+  return "$code"
+}
+trap cleanup EXIT
+trap 'INTERRUPTED=true; exit 130' INT
+trap 'INTERRUPTED=true; exit 143' TERM
+if $DRY_RUN; then
+  LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/deploy-kit-dry-run.XXXXXX")
+else
+  mkdir -p "${SCRIPT_DIR}/.deploy-logs"
+  LOG_DIR=$(mktemp -d "${SCRIPT_DIR}/.deploy-logs/$(date +%Y%m%d-%H%M%S).XXXXXX")
+fi
+mkdir -p "$LOG_DIR/inputs" "$LOG_DIR/verified"
+export DEPLOY_LOG_DIR="$LOG_DIR"
+info "Deployment logs: $LOG_DIR"
+$DRY_RUN && info 'DRY RUN — validation only; hooks, pulls, builds, and remote actions are skipped'
+$SKIP_TESTS && warn 'Tests are explicitly disabled for this run'
+
+# Keep main-process network work interruptible too (not just service workers).
+run_foreground() {
+  local budget="$1" code=0; shift
+  setsid timeout --kill-after=5 "$budget" "$@" &
+  MAIN_COMMAND_PID=$!
+  wait "$MAIN_COMMAND_PID" || code=$?
+  MAIN_COMMAND_PID=''
+  return "$code"
+}
+
+# Pull before planning. A failure is fatal; comparing SHAs cannot classify a
+# failed network operation as a successful update. Reparse after registry and
+# package updates, since both can change the selected graph.
+# Collect completions directly; status files are diagnostics, never a wait API.
+wait_owned_job() {
+  local known
+  COLLECTED_PID='' COLLECTED_CODE=0
+  for known in "${!JOB_SERVICE[@]}"; do
+    if ! kill -0 "$known" 2>/dev/null; then
+      wait "$known" || COLLECTED_CODE=$?
+      COLLECTED_PID="$known"; return 0
+    fi
+  done
+  wait -n -p COLLECTED_PID "${!JOB_SERVICE[@]}" || COLLECTED_CODE=$?
+  [ -n "${COLLECTED_PID:-}" ] || die 'Could not collect an active deployment worker'
+}
+declare -A PULLED=() PULL_BEFORE=()
+ANY_LIB_CHANGED=false
+export ANY_LIB_CHANGED
+finish_pull() {
+  local id pid after
+  wait_owned_job
+  pid="$COLLECTED_PID"; id="${JOB_SERVICE[$pid]}"
+  if [ "$COLLECTED_CODE" -ne 0 ]; then
+    terminate_deploy_sessions "$pid"
+    unset 'JOB_SERVICE[$pid]' 'JOB_PHASE[$pid]'
+    cat "$LOG_DIR/$id.pull.log"; die "Pull failed: $id"
+  fi
+  unset 'JOB_SERVICE[$pid]' 'JOB_PHASE[$pid]'
+  after=$(git -C "$ROOT_DIR/$id" rev-parse HEAD)
+  PULLED[$id]=1
+  if [[ "$id" == *-library ]] && [ "${PULL_BEFORE[$id]}" != "$after" ]; then ANY_LIB_CHANGED=true; fi
+}
+pull_repos() {
+  local id pid
+  for id in "$@"; do
+    [ "${PULLED[$id]:-0}" = 0 ] || continue
+    [ -d "$ROOT_DIR/$id" ] || die "Missing repository: $id"
+    while [ "${#JOB_SERVICE[@]}" -ge "$MAX_CONCURRENT_SSH" ]; do finish_pull; done
+    PULL_BEFORE[$id]=$(git -C "$ROOT_DIR/$id" rev-parse HEAD)
+    step "Pulling $id"
+    setsid timeout --kill-after=5 "$BUILD_PHASE_TIMEOUT" git -C "$ROOT_DIR/$id" pull --ff-only \
+      > "$LOG_DIR/$id.pull.log" 2>&1 &
+    pid=$!; JOB_SERVICE[$pid]="$id"; JOB_PHASE[$pid]=pull
+  done
+  while [ "${#JOB_SERVICE[@]}" -gt 0 ]; do finish_pull; done
+}
+if ! $DRY_RUN && ! $SKIP_PULL; then
+  # Read the registry's newest roster before pulling selected applications.
+  if [ -n "${SVC_DEPLOY_TARGET[vault-service]:-}" ]; then pull_repos vault-service; load_projects; select_services; fi
+  selected_repos=()
+  for svc in "${ALL_SERVICES[@]}"; do should_deploy "$svc" && selected_repos+=("$svc"); done
+  pull_repos "${selected_repos[@]}"
+  load_projects; select_services
+fi
+if ! $DRY_RUN && ! $SKIP_DEPS && ! $SKIP_PULL; then
+  declare -A required_libs=()
+  # A pulled library can introduce another dependency. Refresh the graph until
+  # every library needed by the final plan has been synchronized.
+  while :; do
+    required_libs=(); next_libs=()
+    for svc in "${ALL_SERVICES[@]}"; do
+      if ! should_deploy "$svc" && ! { $CHANGED_ONLY && [ "$svc" = vault-service ]; }; then continue; fi
+      for lib in ${SVC_LIB_DEPS[$svc]:-}; do required_libs[$lib]=1; done
+    done
+    for lib in "${LIBRARY_IDS[@]}"; do
+      if [ "${required_libs[$lib]:-0}" = 1 ] && [ "${PULLED[$lib]:-0}" = 0 ]; then next_libs+=("$lib"); fi
+    done
+    [ "${#next_libs[@]}" -gt 0 ] || break
+    pull_repos "${next_libs[@]}"
+    load_projects; select_services
+  done
+fi
+for svc in "${ALL_SERVICES[@]}"; do
+  SVC_COLORS[$svc]=$(svc_color "$svc")
+  SVC_SHARED[$svc]=0
+  if grep -qE 'source .*deploy-kit/lib.sh' "${ROOT_DIR}/${svc}/deploy.sh" 2>/dev/null; then SVC_SHARED[$svc]=1; fi
+  if should_deploy "$svc"; then
+    [ -f "${ROOT_DIR}/${svc}/deploy.sh" ] || die "Missing deploy.sh for $svc"
+  fi
+done
+snapshot_one() {
+  node "$STATE_HELPER" snapshot --root "$ROOT_DIR" --kit "$SCRIPT_DIR" --config "$DEPLOY_CONFIG_DIR" \
+    --projects "$PROJECTS_JSON" --service "$1" --libs "${SVC_LIB_DEPS[$1]:-}" --output "$2"
+}
+# These pairs include transitive libraries, and are shared with impact analysis.
+pairs=''
+for svc in "${ALL_SERVICES[@]}"; do
+  if should_deploy "$svc" || [ "$svc" = vault-service ]; then
+    libs="${SVC_LIB_DEPS[$svc]:-}"
+    pairs+="${svc}:${libs// /,};"
+  fi
+done
+node "$STATE_HELPER" snapshot --root "$ROOT_DIR" --kit "$SCRIPT_DIR" --config "$DEPLOY_CONFIG_DIR" \
+  --projects "$PROJECTS_JSON" --pairs "$pairs" --out "$LOG_DIR/inputs"
+if $CHANGED_ONLY && ! $BUILD_ONLY && [ -n "${SVC_DEPLOY_TARGET[vault-service]:-}" ]; then
+  vault_target="${SVC_DEPLOY_TARGET[vault-service]}"
+  if ! node "$STATE_HELPER" registry-matches --current "$LOG_DIR/inputs/vault-service.json" \
+    --previous "$DEPLOY_STATE_ROOT/deployed/$vault_target/vault-service.json"; then
+    [[ ",$SKIP_LIST," != *,vault-service,* ]] || die 'Registry changes require vault-service; remove --skip=vault-service.'
+    SVC_SELECTED[vault-service]=1
+    [ -f "${ROOT_DIR}/vault-service/deploy.sh" ] || die 'Registry changes require vault-service/deploy.sh'
+    info 'Registry has not been deployed to this target — including vault-service before dependents'
+  fi
+fi
+if $CHANGED_ONLY && ! $SKIP_DEPS && ! $NO_IMPACT; then
+  if impact=$(node "${SCRIPT_DIR}/scripts/lib-impact.js" --root "$ROOT_DIR" --state "$DEPLOY_STATE_DIR" \
+    --projects "$PROJECTS_JSON" --pairs "$pairs" 2>"$LOG_DIR/impact.log"); then
+    eval "$impact"
+  else
+    warn 'Impact analysis failed; using conservative dependency comparison'
+  fi
+fi
+state_file() { printf '%s/%s/%s/%s.json' "$DEPLOY_STATE_ROOT" "$1" "${SVC_DEPLOY_TARGET[$2]}" "$2"; }
+set_status() { PHASE_STATUS[$1.$2]="$3"; printf '%s\n' "$3" > "$LOG_DIR/$1.$2.status"; }
+changed_count=0
+for svc in "${ALL_SERVICES[@]}"; do
+  SVC_CHANGED[$svc]=0; NEEDS_BUILD[$svc]=1
+  if ! should_deploy "$svc"; then
+    set_status "$svc" build SKIP; set_status "$svc" transfer SKIP; set_status "$svc" deploy SKIP; continue
+  fi
+  impact_verdict=''
+  $IMPACT_SCRIPT_OK && impact_verdict="${IMPACT_VERDICT[$svc]:-}"
+  if $CHANGED_ONLY && node "$STATE_HELPER" matches --current "$LOG_DIR/inputs/$svc.json" \
+    --previous "$(state_file "$STATE_MODE" "$svc")" --impact "$impact_verdict" --ignore-libraries "$SKIP_DEPS"; then
+    # A build marker cannot make a deleted/replaced local image reusable.
+    if ! $BUILD_ONLY && [ ! -f "$(state_file pending "$svc")" ]; then
+      info "Skipping $svc (matches successful deployment)"
+      set_status "$svc" build SKIP; set_status "$svc" transfer SKIP; set_status "$svc" deploy SKIP; continue
+    fi
+  fi
+  SVC_CHANGED[$svc]=1; changed_count=$((changed_count + 1))
+  if ! $NO_CACHE && [ "${SVC_SHARED[$svc]}" = 1 ] && node "$STATE_HELPER" matches \
+    --current "$LOG_DIR/inputs/$svc.json" --previous "$(state_file built "$svc")" --impact "$impact_verdict" --ignore-libraries "$SKIP_DEPS"; then
+    saved_image=$(node "$STATE_HELPER" image --input "$(state_file built "$svc")" --allow-untested "$SKIP_TESTS")
+    current_image=$(timeout --kill-after=5 "$REMOTE_TIMEOUT" docker image inspect --format '{{.Id}}' "${svc}:latest" 2>/dev/null || true)
+    if [ -n "$saved_image" ] && [ "$saved_image" = "$current_image" ]; then
+      NEEDS_BUILD[$svc]=0; set_status "$svc" build OK
+      info "Reusing verified local image for $svc"
     fi
   fi
 done
-unset _svc _arch _handler _FOREIGN_ARCHES
 
-# ── Prefetch git.sha image labels (one docker call, not N) ────
-# has_changes() needs the git.sha label of every <svc>:latest image.
-# Inspecting them one-by-one costs ~100ms per docker CLI invocation;
-# a single batched inspect fetches them all at once.
-declare -A IMAGE_SHA
-if $CHANGED_ONLY; then
-  _images=()
-  for svc in "${ALL_SERVICES[@]}"; do _images+=("${svc}:latest"); done
-  while IFS='|' read -r _tags _sha; do
-    [ "$_sha" = "<no value>" ] && _sha=""
-    for _tag in ${_tags//,/ }; do
-      case "$_tag" in
-        *:latest) IMAGE_SHA[${_tag%:latest}]="$_sha" ;;
-      esac
-    done
-  done < <(docker image inspect --format '{{join .RepoTags ","}}|{{index .Config.Labels "git.sha"}}' "${_images[@]}" 2>/dev/null || true)
-fi
-
-# ── Detect projects.json changes (force vault-service deploy) ─
-# When --changed-only is set, check if vault-service/projects.json
-# was modified since the last vault-service image was built. If so,
-# vault-service MUST be redeployed before any other service so that
-# dependents pick up the latest config registry.
-VAULT_CONFIG_CHANGED=false
-if $CHANGED_ONLY; then
-  _vault_last_sha="${IMAGE_SHA[vault-service]:-}"
-  if [ -n "$_vault_last_sha" ]; then
-    if ! (cd "${ROOT_DIR}/vault-service" && git diff --quiet "$_vault_last_sha" HEAD -- projects.json 2>/dev/null); then
-      VAULT_CONFIG_CHANGED=true
-    fi
+# Remote commands are bounded and quoted once at the SSH boundary.
+device_docker() {
+  local device="$1"; shift
+  if [ "${DEVICE_METHOD[$device]:-ssh}" = docker-api ]; then
+    timeout --kill-after=5 "$REMOTE_TIMEOUT" docker -H "${DEVICE_DOCKER_API[$device]}" "$@"
   else
-    # No previous vault image — treat config as changed
-    VAULT_CONFIG_CHANGED=true
+    local command
+    printf -v command '%q ' sudo "${DEVICE_DOCKER_BIN[$device]:-/usr/local/bin/docker}" "$@"
+    timeout --kill-after=5 "$REMOTE_TIMEOUT" ssh -o ConnectTimeout=8 -o BatchMode=yes \
+      "${DEVICE_SSH_ALIAS[$device]:-nas}" "$command"
+  fi
+}
+if ! $DRY_RUN && [ "$changed_count" -gt 0 ]; then
+  start_deploy_agent
+  declare -A foreign_arches=() selected_targets=()
+  host_arch=$(uname -m)
+  case "$host_arch" in x86_64) host_arch=amd64 ;; aarch64) host_arch=arm64 ;; esac
+  for svc in "${ALL_SERVICES[@]}"; do
+    [ "${SVC_CHANGED[$svc]}" = 1 ] || continue
+    target="${SVC_DEPLOY_TARGET[$svc]}"; selected_targets[$target]=1
+    arch="${DEVICE_ARCH[$target]:-}"
+    if [ "${NEEDS_BUILD[$svc]}" = 1 ] && [ "${SVC_SHARED[$svc]}" = 1 ] && [ -n "$arch" ] && [ "$arch" != "$host_arch" ]; then foreign_arches[$arch]=1; fi
+  done
+  for arch in "${!foreign_arches[@]}"; do
+    case "$arch" in arm64) handler=qemu-aarch64 ;; amd64) handler=qemu-x86_64 ;; *) handler="qemu-$arch" ;; esac
+    if [ ! -f "/proc/sys/fs/binfmt_misc/$handler" ]; then
+      run_foreground "$BUILD_PHASE_TIMEOUT" docker run --privileged --rm tonistiigi/binfmt --install "$arch" || die "Cannot install emulator for $arch"
+      [ -f "/proc/sys/fs/binfmt_misc/$handler" ] || die "Emulator unavailable: $handler"
+    fi
+  done
+  if ! $BUILD_ONLY; then
+    for target in "${!selected_targets[@]}"; do
+      device_docker "$target" network prune -f > "$LOG_DIR/$target.network-prune.log" 2>&1 || warn "Network cleanup failed for $target; see logs"
+    done
   fi
 fi
 
-# ── Service filter ────────────────────────────────────────────
-should_deploy() {
-  local svc="$1"
-
-  # --group filter: if set, service must match one of the categories
-  # Categories: "service", "client", "bot", "vault" (vault-service specifically)
-  if [ -n "$GROUP" ]; then
-    local svc_cat
-    svc_cat=$(svc_category "$svc")
-    local match=false
-    IFS=',' read -ra groups <<< "$GROUP"
-    for g in "${groups[@]}"; do
-      case "$g" in
-        vault)   [ "$svc" = "vault-service" ] && match=true ;;
-        service) [ "$svc_cat" = "service" ] && [ "$svc" != "vault-service" ] && match=true ;;
-        *)       [ "$svc_cat" = "$g" ] && match=true ;;
-      esac
-    done
-    $match || return 1
+export DEPLOY_ORCHESTRATED=true
+launch_phase() {
+  local svc="$1" phase="$2" target="${SVC_DEPLOY_TARGET[$1]}" budget
+  local flags=()
+  case "$phase" in
+    build) flags+=(--build-only); budget="$BUILD_PHASE_TIMEOUT"
+      # Legacy scripts may pull images remotely in their build phase. Validate
+      # them here and execute their complete pipeline only in the deploy tier.
+      [ "${SVC_SHARED[$svc]}" = 1 ] || flags+=(--dry-run) ;;
+    transfer) flags+=(--transfer-only); budget="$TRANSFER_PHASE_TIMEOUT" ;;
+    restart) flags+=(--restart-only); budget="$RESTART_PHASE_TIMEOUT" ;;
+    deploy) budget="$BUILD_PHASE_TIMEOUT" ;;
+  esac
+  $DRY_RUN && flags+=(--dry-run)
+  $NO_CACHE && flags+=(--no-cache)
+  $SKIP_TESTS && flags+=(--skip-tests)
+  # Shared wrappers already had their Git repositories pulled by this run.
+  if $SKIP_PULL || [ "${SVC_SHARED[$svc]}" = 1 ]; then flags+=(--skip-pull); fi
+  if [ "$phase" != build ] && ! $DRY_RUN; then
+    snapshot_one "$svc" "$LOG_DIR/verified/$svc.json" || return 1
+    node "$STATE_HELPER" matches --current "$LOG_DIR/verified/$svc.json" --previous "$LOG_DIR/inputs/$svc.json" || {
+      warn "$svc changed after build/planning; refusing to deploy mixed inputs"; return 1;
+    }
+    # Keep the last healthy receipt for rollback, but force a retry until every
+    # mutating phase and health check has completed, even if source is reverted.
+    node "$STATE_HELPER" record --input "$LOG_DIR/inputs/$svc.json" --output "$(state_file pending "$svc")" || return 1
   fi
-
-  # --only filter: if set, service must be in the list
-  if [ -n "$ONLY" ]; then
-    [[ ",$ONLY," == *",$svc,"* ]] && return 0 || return 1
+  local previous_image
+  previous_image=$(node "$STATE_HELPER" image --input "$(state_file deployed "$svc")")
+  info "Starting $phase for $svc"
+  DEPLOY_TARGET="$target" DEPLOY_METHOD="${DEVICE_METHOD[$target]:-ssh}" \
+  DEPLOY_HOSTNAME="${DEVICE_HOSTNAME[$target]:-}" DEPLOY_ARCH="${DEVICE_ARCH[$target]:-}" \
+  DEPLOY_SSH_HOST="${DEVICE_SSH_ALIAS[$target]:-nas}" DEPLOY_DOCKER_BIN="${DEVICE_DOCKER_BIN[$target]:-/usr/local/bin/docker}" \
+  DEPLOY_DOCKER_API="${DEVICE_DOCKER_API[$target]:-}" DEPLOY_COMPOSE_ROOT="${DEVICE_COMPOSE_ROOT[$target]:-/volume1/docker}" \
+  DEPLOY_SMB_ROOT="${DEVICE_SMB_ROOT[$target]:-/mnt/k}" DEPLOY_SERVICE_ID="$svc" \
+  DEPLOY_SERVICE_COLOR="${SVC_COLORS[$svc]}" DEPLOY_COLOR_RESET="$RESET" \
+  DEPLOY_PHASE_LOG="$LOG_DIR/$svc.$phase.log" DEPLOY_DOCKER_LOG="$LOG_DIR/$svc.docker.log" \
+  DEPLOY_PREVIOUS_IMAGE="$previous_image" \
+  DEPLOY_BUILD_SNAPSHOT="$LOG_DIR/inputs/$svc.json" DEPLOY_LIBRARY_IDS="${SVC_LIB_DEPS[$svc]:-}" \
+  DEPLOY_STATE_HELPER="$STATE_HELPER" \
+    setsid timeout --kill-after=5 "$budget" bash "$SCRIPT_DIR/scripts/run-service.sh" \
+      "$SCRIPT_DIR" "$ROOT_DIR/$svc/deploy.sh" "${flags[@]}" &
+  local pid=$!
+  JOB_SERVICE[$pid]="$svc"; JOB_PHASE[$pid]="$phase"
+  set_status "$svc" "$phase" RUNNING
+}
+finish_job() {
+  local pid="$1" code="$2" svc="${JOB_SERVICE[$1]}" phase="${JOB_PHASE[$1]}" image
+  # timeout/worker death may leave descendants. Reap the whole owned session.
+  if [ "$code" -ne 0 ]; then terminate_deploy_sessions "$pid"; fi
+  unset 'JOB_SERVICE[$pid]' 'JOB_PHASE[$pid]'
+  if [ "$code" -eq 0 ] && [ "$phase" = build ] && ! $DRY_RUN && [ "${SVC_SHARED[$svc]}" = 1 ]; then
+    if ! snapshot_one "$svc" "$LOG_DIR/verified/$svc.json" || ! node "$STATE_HELPER" matches \
+      --current "$LOG_DIR/verified/$svc.json" --previous "$LOG_DIR/inputs/$svc.json"; then
+      warn "$svc inputs changed during its build; image will not be reused"; code=1
+    else
+      image=$(timeout --kill-after=5 "$REMOTE_TIMEOUT" docker image inspect --format '{{.Id}}' "${svc}:latest" 2>/dev/null || true)
+      if [ -z "$image" ]; then code=1; warn "$svc produced no local image"
+      elif ! node "$STATE_HELPER" record --input "$LOG_DIR/inputs/$svc.json" --image "$image" --output "$(state_file built "$svc")" --unknown-libraries "$SKIP_DEPS" --tests-skipped "$SKIP_TESTS"; then code=1; fi
+    fi
   fi
-
-  # --skip filter: if set, service must NOT be in the list
-  if [ -n "$SKIP_LIST" ]; then
-    [[ ",$SKIP_LIST," == *",$svc,"* ]] && return 1 || return 0
-  fi
-
+  if [ "$code" -eq 0 ]; then set_status "$svc" "$phase" OK; ok "$svc $phase complete"
+  else set_status "$svc" "$phase" FAIL; fail "$svc $phase failed (exit $code) — $LOG_DIR/$svc.$phase.log"; fi
+  if [ "$phase" = build ] && [ "$code" -ne 0 ]; then set_status "$svc" transfer FAIL; set_status "$svc" deploy FAIL; fi
+  if [ "$phase" = transfer ] && [ "$code" -ne 0 ]; then set_status "$svc" deploy FAIL; fi
+}
+wait_job() {
+  wait_owned_job
+  finish_job "$COLLECTED_PID" "$COLLECTED_CODE"
+}
+pump_preparation() {
+  local builds=0 transfers=0 pid svc
+  if $NO_PARALLEL && [ "${#JOB_SERVICE[@]}" -gt 0 ]; then return 0; fi
+  for pid in "${!JOB_PHASE[@]}"; do
+    case "${JOB_PHASE[$pid]}" in build) builds=$((builds + 1)) ;; *) transfers=$((transfers + 1)) ;; esac
+  done
+  for svc in "${ALL_SERVICES[@]}"; do
+    [ "${SVC_CHANGED[$svc]}" = 1 ] || continue
+    if [ -z "${PHASE_STATUS[$svc.build]:-}" ] && [ "$builds" -lt "$MAX_CONCURRENT_BUILDS" ]; then
+      launch_phase "$svc" build; builds=$((builds + 1))
+      $NO_PARALLEL && return 0
+    fi
+    if ! $BUILD_ONLY && [ "${PHASE_STATUS[$svc.build]:-}" = OK ] && [ -z "${PHASE_STATUS[$svc.transfer]:-}" ]; then
+      if [ "${SVC_SHARED[$svc]}" = 0 ]; then set_status "$svc" transfer OK
+      elif [ "$transfers" -lt "$MAX_CONCURRENT_SSH" ]; then
+        if launch_phase "$svc" transfer; then transfers=$((transfers + 1)); if $NO_PARALLEL; then return 0; fi; else set_status "$svc" transfer FAIL; set_status "$svc" deploy FAIL; fi
+      fi
+    fi
+  done
+}
+tier_prepared() {
+  local svc phase=transfer
+  $BUILD_ONLY && phase=build
+  for svc in "$@"; do
+    [ "${SVC_CHANGED[$svc]}" = 1 ] || continue
+    case "${PHASE_STATUS[$svc.$phase]:-}" in OK|FAIL) ;; *) return 1 ;; esac
+  done
   return 0
 }
+wait_prepared() {
+  while :; do
+    # Sequential mode must finish this tier before starting a later build.
+    if $NO_PARALLEL && tier_prepared "$@"; then return 0; fi
+    pump_preparation
+    tier_prepared "$@" && return 0
+    [ "${#JOB_SERVICE[@]}" -gt 0 ] || die 'Preparation has no active workers but incomplete services'
+    wait_job
+  done
+}
 
-# ── Cache should_deploy verdicts ──────────────────────────────
-# Filters are fixed once flags are parsed, so evaluate each service
-# once and turn should_deploy into a pure array lookup (it's called
-# from hot paths and background jobs).
-declare -A SVC_DEPLOYABLE
-for svc in "${ALL_SERVICES[@]}"; do
-  if should_deploy "$svc"; then SVC_DEPLOYABLE[$svc]=1; else SVC_DEPLOYABLE[$svc]=0; fi
-done
-should_deploy() { [ "${SVC_DEPLOYABLE[$1]:-0}" = "1" ]; }
-
-# ── Progress denominator ──────────────────────────────────────
-# One build unit per service, plus (unless --build-only) one deploy
-# unit per service and one transfer unit per deployable service in
-# parallel mode. Matches the status files progress_percentage counts.
-for svc in "${ALL_SERVICES[@]}"; do
-  PROGRESS_TOTAL=$((PROGRESS_TOTAL + 1))
-  if ! $BUILD_ONLY; then
-    PROGRESS_TOTAL=$((PROGRESS_TOTAL + 1))
-    if ! $NO_PARALLEL && should_deploy "$svc"; then
-      PROGRESS_TOTAL=$((PROGRESS_TOTAL + 1))
-    fi
-  fi
-done
-
-# ── Persistent deploy-state directory (survives across runs) ──
-DEPLOY_STATE_DIR="${SCRIPT_DIR}/.deploy-state"
-mkdir -p "$DEPLOY_STATE_DIR"
-
-# ── Change detection ──────────────────────────────────────────
-# Returns 0 (true) if service has changes since last built image.
-# Two-tier SHA lookup:
-#   1. Docker image label "git.sha" (services that build locally)
-#   2. Persistent marker file .deploy-state/<svc>.sha (services
-#      using pre-built images, e.g. qbittorrent-service)
-has_changes() {
-  local svc="$1"
-  local svc_dir="${ROOT_DIR}/${svc}"
-
-  # If --changed-only is not set, always consider changed
-  if ! $CHANGED_ONLY; then
-    return 0
-  fi
-
-  # Force vault-service when projects.json changed — the config
-  # registry must be live before any dependent services start.
-  if [ "$svc" = "vault-service" ] && $VAULT_CONFIG_CHANGED; then
-    return 0
-  fi
-
-  # Tier 1: Docker image label (batch-prefetched into IMAGE_SHA at startup)
-  local last_sha="${IMAGE_SHA[$svc]:-}"
-
-  # Tier 2: Persistent marker file (pre-built / non-docker-build services)
-  if [ -z "$last_sha" ]; then
-    local marker_file="${DEPLOY_STATE_DIR}/${svc}.sha"
-    if [ -f "$marker_file" ]; then
-      last_sha=$(cat "$marker_file" 2>/dev/null || echo "")
-    fi
-  fi
-
-  if [ -z "$last_sha" ]; then
-    # No previous image or marker — must build
-    return 0
-  fi
-
-  # Check if there are any changes since that SHA in the service itself
-  if ! (cd "$svc_dir" && git diff --quiet "$last_sha" -- . 2>/dev/null) || \
-     [ -n "$(cd "$svc_dir" && git ls-files --others --exclude-standard . 2>/dev/null)" ]; then
-    # Has changes
-    return 0
-  fi
-
-  # Check if any library dependency has changed since the last deploy of this service
-  if ! $SKIP_DEPS && [ -n "${SVC_LIB_DEPS[$svc]:-}" ]; then
-    local dep_file="${DEPLOY_STATE_DIR}/${svc}.deps.sha"
-    if [ ! -f "$dep_file" ]; then
-      # Quietly initialize the dependency marker file to prevent false-positive initial bootstrap builds
-      rm -f "$dep_file"
-      for dep_id in ${SVC_LIB_DEPS[$svc]}; do
-        local dep_dir="${ROOT_DIR}/${dep_id}"
-        local dep_sha
-        dep_sha=$(cd "$dep_dir" && git rev-parse HEAD 2>/dev/null || echo "")
-        if [ -n "$dep_sha" ]; then
-          echo "${dep_id}: ${dep_sha}" >> "$dep_file"
-        fi
-      done
-    fi
-
-    # ── Symbol-level impact verdict (scripts/lib-impact.js) ────
-    # When the analysis ran successfully, its verdict replaces the
-    # coarse SHA comparison below: a library change only triggers a
-    # rebuild when this service actually imports an affected export
-    # (directly, or through components-library's use of utilities).
-    # All analysis uncertainty resolves to "affected" inside the
-    # script (fail-open); a script failure leaves IMPACT_SCRIPT_OK
-    # false so we fall through to the legacy whole-library check.
-    if [ "${IMPACT_SCRIPT_OK:-false}" = "true" ] && [ -n "${IMPACT_VERDICT[$svc]:-}" ]; then
-      if [ "${IMPACT_VERDICT[$svc]}" = "affected" ]; then
-        return 0
+discover_migrations() {
+  local device svc target names
+  for device in "${DOCKER_DEVICES[@]}"; do
+    if names=$(device_docker "$device" ps -a --format '{{.Names}}' 2>"$LOG_DIR/$device.containers.log"); then
+      DEVICE_REACHABLE[$device]=1; DEVICE_CONTAINERS[$device]="$names"
+    else DEVICE_REACHABLE[$device]=0; warn "Cannot check existing containers on $device"; fi
+  done
+  for svc in "${ALL_SERVICES[@]}"; do
+    [ "${SVC_CHANGED[$svc]}" = 1 ] || continue
+    target="${SVC_DEPLOY_TARGET[$svc]}"
+    for device in "${DOCKER_DEVICES[@]}"; do
+      [ "$device" != "$target" ] || continue
+      if [ "${DEVICE_REACHABLE[$device]}" = 0 ]; then
+        [ ! -f "$DEPLOY_STATE_ROOT/deployed/$device/$svc.json" ] || die "Cannot safely migrate $svc: previous target $device is unreachable"
+        continue
       fi
-      return 1   # unaffected | none — no library-triggered rebuild
-    fi
-
-    # Read the saved dependency SHAs
-    declare -A saved_shas
-    while IFS=': ' read -r dep_id dep_sha || [ -n "$dep_id" ]; do
-      [ -z "$dep_id" ] && continue
-      saved_shas[$dep_id]="$dep_sha"
-    done < "$dep_file"
-
-    for dep_id in ${SVC_LIB_DEPS[$svc]}; do
-      local dep_dir="${ROOT_DIR}/${dep_id}"
-      # Stale or phantom dependency (e.g. the merged-away
-      # service-library): a missing directory yields no signal, but
-      # the cd-failure below would read as "dirty" and force a
-      # rebuild on every single run.
-      [ -d "$dep_dir" ] || continue
-      local current_dep_sha
-      current_dep_sha=$(cd "$dep_dir" && git rev-parse HEAD 2>/dev/null || echo "")
-      local saved_dep_sha="${saved_shas[$dep_id]:-}"
-
-      if [ "$current_dep_sha" != "$saved_dep_sha" ]; then
-        # Library SHA has changed!
-        return 0
-      fi
-
-      # Also check if the library directory itself has dirty uncommitted changes or unpushed commits
-      if ! (cd "$dep_dir" && git diff --quiet HEAD -- . 2>/dev/null) || \
-         [ -n "$(cd "$dep_dir" && git ls-files --others --exclude-standard . 2>/dev/null)" ]; then
-        # Library has local uncommitted changes!
-        return 0
-      fi
-      if (cd "$dep_dir" && git rev-parse --abbrev-ref @{u} &>/dev/null) && \
-         [ "$(cd "$dep_dir" && git rev-list --count @{u}..HEAD 2>/dev/null || echo 0)" -gt 0 ]; then
-        # Library has local unpushed commits!
-        return 0
-      fi
+      case $'\n'"${DEVICE_CONTAINERS[$device]}"$'\n' in
+        *$'\n'"$svc"$'\n'*) MIGRATION_SOURCES[$svc]="${MIGRATION_SOURCES[$svc]:-} $device" ;;
+      esac
     done
-  fi
-
-  return 1
-}
-
-# ── Build deploy flags ────────────────────────────────────────
-build_flags() {
-  local flags=""
-  $DRY_RUN    && flags="$flags --dry-run"
-  $SKIP_PULL  && flags="$flags --skip-pull"
-  $SKIP_TESTS && flags="$flags --skip-tests"
-  $NO_CACHE   && flags="$flags --no-cache"
-  echo "$flags"
-}
-
-# ── Run a phase (build or deploy) for a single service ────────
-# Generic runner — accepts the phase name and deploy.sh flag.
-#   $1  svc         service directory name
-#   $2  prefix      "true" to prefix output with colored service name
-#   $3  phase       "build" | "deploy" (used for log/status filenames)
-#   $4  phase_flag  "--build-only" | "--deploy-only"
-run_phase() {
-  local svc="$1"
-  local prefix="$2"
-  local phase="$3"
-  local phase_flag="$4"
-  local svc_dir="${ROOT_DIR}/${svc}"
-  local log_file="${LOG_DIR}/${svc}.${phase}.log"
-  local status_file="${LOG_DIR}/${svc}.${phase}.status"
-  local flags
-  flags=$(build_flags)
-
-  if [ ! -f "${svc_dir}/deploy.sh" ]; then
-    [ "$phase" = "build" ] && fail "${svc}: no deploy.sh found — skipping"
-    echo "SKIP" > "$status_file"
-    return 0
-  fi
-
-  local color="${SVC_COLORS[$svc]:-$DIM}"
-  local pad_svc
-  pad_svc=$(printf '%-20s' "$svc")
-
-  # ── Export device-specific deploy vars for lib.sh ──────────
-  local target="${SVC_DEPLOY_TARGET[$svc]:-synology}"
-  export DEPLOY_TARGET="$target"
-  export DEPLOY_METHOD="${DEVICE_METHOD[$target]:-ssh}"
-  export DEPLOY_HOSTNAME="${DEVICE_HOSTNAME[$target]:-}"
-  export DEPLOY_ARCH="${DEVICE_ARCH[$target]:-}"
-  export DEPLOY_SSH_HOST="${DEVICE_SSH_ALIAS[$target]:-nas}"
-  export DEPLOY_DOCKER_BIN="${DEVICE_DOCKER_BIN[$target]:-/usr/local/bin/docker}"
-  export DEPLOY_DOCKER_API="${DEVICE_DOCKER_API[$target]:-}"
-  export DEPLOY_COMPOSE_ROOT="${DEVICE_COMPOSE_ROOT[$target]:-/volume1/docker}"
-  export DEPLOY_SMB_ROOT="${DEVICE_SMB_ROOT[$target]:-/mnt/k}"
-
-  if [ "$prefix" = "true" ]; then
-    # Prefix each line inline (no $(ts) subshell per line — this loop
-    # runs for every line of build output across all parallel jobs)
-    bash "${svc_dir}/deploy.sh" ${phase_flag} $flags 2>&1 \
-      | tee "$log_file" \
-      | while IFS= read -r line; do
-          progress_percentage
-          printf '%s%04ds %s %(%H:%M:%S)T%s %s%s[%s]%s %s\n' \
-            "$DIM" "$(( SECONDS - ${DEPLOY_START:-$SECONDS} ))" "$PROGRESS_PCT" -1 "$RESET" \
-            "$color" "$BOLD" "$pad_svc" "$RESET" "$line"
-        done \
-      && { echo "OK" > "$status_file"; } \
-      || { echo "FAIL" > "$status_file"; }
-  else
-    bash "${svc_dir}/deploy.sh" ${phase_flag} $flags 2>&1 \
-      | tee "$log_file" \
-      && { echo "OK" > "$status_file"; } \
-      || { echo "FAIL" > "$status_file"; }
-  fi
-
-  # ── Persist deploy SHA marker for non-docker-build services ──
-  # Services that build local Docker images get a git.sha label
-  # automatically (via lib.sh). Services using pre-built images
-  # (e.g. qbittorrent-service) don't — so we persist the SHA to
-  # a marker file for has_changes() to use on subsequent runs.
-  # NEVER during --dry-run: deploy.sh no-ops report OK, and advancing
-  # the markers without actually building would make the next real
-  # run silently skip the library changes this service still needs.
-  if ! $DRY_RUN && { [ "$phase" = "build" ] || [ "$phase" = "deploy" ] || [ "$phase" = "restart" ]; } && [ "$(cat "$status_file" 2>/dev/null)" = "OK" ]; then
-    local current_sha
-    current_sha=$(cd "$svc_dir" && git rev-parse HEAD 2>/dev/null || echo "")
-    if [ -n "$current_sha" ]; then
-      echo "$current_sha" > "${DEPLOY_STATE_DIR}/${svc}.sha"
-    fi
-
-    # Persist the current git SHAs of all library dependencies
-    if [ -n "${SVC_LIB_DEPS[$svc]:-}" ]; then
-      local dep_file="${DEPLOY_STATE_DIR}/${svc}.deps.sha"
-      rm -f "$dep_file"
-      for dep_id in ${SVC_LIB_DEPS[$svc]}; do
-        local dep_dir="${ROOT_DIR}/${dep_id}"
-        local dep_sha
-        dep_sha=$(cd "$dep_dir" && git rev-parse HEAD 2>/dev/null || echo "")
-        if [ -n "$dep_sha" ]; then
-          echo "${dep_id}: ${dep_sha}" >> "$dep_file"
-        fi
-      done
-    fi
-  fi
-}
-
-build_service()    { run_phase "$1" "$2" "build"    "--build-only";    }
-deploy_service()   { run_phase "$1" "$2" "deploy"   "--deploy-only";   }
-transfer_service() { run_phase "$1" "$2" "transfer" "--transfer-only"; }
-restart_service()  { run_phase "$1" "$2" "restart"  "--restart-only";  }
-
-# ── Build concurrency semaphore ───────────────────────────────
-# Uses a FIFO pipe as a counting semaphore to cap the number of
-# simultaneous docker builds to prevent CPU and I/O saturation.
-# Without this, 25+ concurrent builds can overwhelm the system.
-SEM_FIFO="${LOG_DIR}/.build-semaphore"
-SSH_SEM_FIFO="${LOG_DIR}/.ssh-semaphore"
-
-init_semaphore() {
-  rm -f "$SEM_FIFO" "$SSH_SEM_FIFO"
-  mkfifo "$SEM_FIFO"
-  mkfifo "$SSH_SEM_FIFO"
-  # Open a persistent read-write FD on the FIFOs.
-  exec 7<>"$SEM_FIFO"
-  exec 8<>"$SSH_SEM_FIFO"
-  # Pre-fill with N tokens
-  local i
-  for ((i = 0; i < MAX_CONCURRENT_BUILDS; i++)); do
-    echo "x" >&7
-  done
-  for ((i = 0; i < MAX_CONCURRENT_SSH; i++)); do
-    echo "x" >&8
   done
 }
-
-sem_acquire() { read -r <&7; }
-sem_release() { echo "x" >&7; }
-
-sem_ssh_acquire() { read -r <&8; }
-sem_ssh_release() { echo "x" >&8; }
-
-# Wrapper: acquire semaphore → build → release
-build_service_throttled() {
-  local svc="$1"
-  local prefix="$2"
-  sem_acquire
-  build_service "$svc" "$prefix"
-  sem_release
-}
-
-# Wrapper: acquire semaphore → transfer → release
-transfer_service_throttled() {
-  local svc="$1"
-  local prefix="$2"
-  sem_ssh_acquire
-  transfer_service "$svc" "$prefix"
-  sem_ssh_release
-}
-
-# Wrapper: acquire semaphore → restart → release
-restart_service_throttled() {
-  local svc="$1"
-  local prefix="$2"
-  sem_ssh_acquire
-  restart_service "$svc" "$prefix"
-  sem_ssh_release
-}
-
-# ── Fire builds for a tier (non-blocking) ─────────────────────
-# Launches all build jobs as background processes and stores PIDs.
-# Does NOT wait — returns immediately so the next tier can fire too.
-fire_builds() {
-  local tier_name="$1"
-  shift
-  local services=("$@")
-  local svc
-
-  # Filter to only services we should deploy
-  local filtered=()
-  for svc in "${services[@]}"; do
-    if should_deploy "$svc"; then
-      if has_changes "$svc"; then
-        filtered+=("$svc")
-      else
-        if [ "${IMPACT_VERDICT[$svc]:-}" = "unaffected" ]; then
-          info "Skipping ${svc} — ${IMPACT_REASON[$svc]:-library changes not imported}"
-        else
-          info "Skipping ${svc} (unchanged since last build)"
-        fi
-        echo "SKIP" > "${LOG_DIR}/${svc}.build.status"
-      fi
-    else
-      info "Skipping ${svc} (filtered)"
-      echo "SKIP" > "${LOG_DIR}/${svc}.build.status"
-    fi
-  done
-
-  if [ ${#filtered[@]} -eq 0 ]; then
-    info "No services to build in ${tier_name}"
-    return 0
-  fi
-
-  step "Launching builds — ${tier_name}: ${filtered[*]}"
-
-  if $NO_PARALLEL; then
-    # Sequential mode: run each build inline (blocking)
-    for svc in "${filtered[@]}"; do
-      build_service "$svc" "false"
-      local status
-      status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "UNKNOWN")
-      if [ "$status" = "OK" ]; then
-        ok "${svc} built successfully"
-      elif [ "$status" = "FAIL" ]; then
-        fail "${svc} build failed"
-        info "Log: ${LOG_DIR}/${svc}.build.log"
-      fi
-    done
-  else
-    # Parallel mode: throttled by semaphore (max $MAX_CONCURRENT_BUILDS)
-    for svc in "${filtered[@]}"; do
-      build_service_throttled "$svc" "true" &
-      echo "$!" > "${LOG_DIR}/${svc}.build.pid"
-      info "  ⟶ ${svc} (PID $!)"
-    done
-  fi
-}
-
-# ── Wait for a tier's builds to finish ────────────────────────
-# Called just before deploying a tier. Collects exit status for
-# each service that was launched in fire_builds.
-wait_builds() {
-  local tier_name="$1"
-  shift
-  local services=("$@")
-  local svc
-
-  # In sequential (--no-parallel) mode, builds already completed inline
-  if $NO_PARALLEL; then
-    return 0
-  fi
-
-  local any_waiting=false
-  for svc in "${services[@]}"; do
-    if [ -f "${LOG_DIR}/${svc}.build.pid" ]; then
-      any_waiting=true
-      break
-    fi
-  done
-
-  if ! $any_waiting; then
-    return 0
-  fi
-
-  step "Waiting for ${tier_name} builds to finish"
-
-  local any_failed=false
-  for svc in "${services[@]}"; do
-    local pid_file="${LOG_DIR}/${svc}.build.pid"
-    if [ ! -f "$pid_file" ]; then
-      continue
-    fi
-
-    local pid
-    pid=$(cat "$pid_file")
-    wait "$pid" 2>/dev/null || true
-
-    local status
-    status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "UNKNOWN")
-    if [ "$status" = "OK" ]; then
-      ok "${svc} built successfully"
-    else
-      fail "${svc} build failed → ${LOG_DIR}/${svc}.build.log"
-      any_failed=true
-    fi
-  done
-
-  if $any_failed; then
-    warn "Some builds in ${tier_name} failed — check logs in ${LOG_DIR}/"
-  fi
-}
-
-# ── Fire eager transfers (non-blocking) ───────────────────────
-# For each service, launch a background job that polls for its
-# build to complete, then immediately starts transferring the
-# image. This overlaps transfers with builds still in progress.
-fire_transfers() {
-  local tier_name="$1"
-  shift
-  local services=("$@")
-
-  if $NO_PARALLEL; then
-    # In sequential mode, transfers happen inline during restart_tier
-    return 0
-  fi
-
-  for svc in "${services[@]}"; do
-    should_deploy "$svc" || continue
-
-    (
-      if [ -f "${LOG_DIR}/${svc}.build.pid" ]; then
-        local build_process_pid
-        build_process_pid=$(cat "${LOG_DIR}/${svc}.build.pid")
-        while kill -0 "$build_process_pid" 2>/dev/null; do
-          sleep 1
-        done
-      fi
-
-      while [ ! -f "${LOG_DIR}/${svc}.build.status" ]; do
-        sleep 1
-      done
-
-      local build_status
-      build_status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "UNKNOWN")
-      if [ "$build_status" != "OK" ]; then
-        echo "SKIP" > "${LOG_DIR}/${svc}.transfer.status"
-        exit 0
-      fi
-
-      transfer_service_throttled "$svc" "true"
-    ) &
-    echo "$!" > "${LOG_DIR}/${svc}.transfer.pid"
+stop_migration_sources() {
+  local svc="$1" device
+  for device in ${MIGRATION_SOURCES[$svc]:-}; do
+    # Preserve the old container (including its image/config) for rollback.
+    MIGRATION_STOPPED[$svc]="${MIGRATION_STOPPED[$svc]:-} $device"
+    device_docker "$device" stop "$svc" >>"$LOG_DIR/$svc.migration.log" 2>&1 || return 1
   done
 }
-
-# ── Wait for a tier's transfers to finish ─────────────────────
-wait_transfers() {
-  local tier_name="$1"
-  shift
-  local services=("$@")
-
-  if $NO_PARALLEL; then
-    return 0
+rollback_migration() {
+  local svc="$1" target="${SVC_DEPLOY_TARGET[$1]}" device names
+  [ -n "${MIGRATION_STOPPED[$svc]:-}" ] || return 0
+  warn "Restoring $svc on its previous target"
+  # Avoid duplicate workers if the new target cannot be reached/stopped.
+  if ! names=$(device_docker "$target" ps -a --filter "name=^/${svc}$" --format '{{.Names}}'); then
+    warn "Cannot confirm $svc stopped on $target; previous containers retained for recovery"; return 1
   fi
-
-  local any_waiting=false
-  for svc in "${services[@]}"; do
-    if [ -f "${LOG_DIR}/${svc}.transfer.pid" ]; then
-      any_waiting=true
-      break
-    fi
-  done
-
-  if ! $any_waiting; then
-    return 0
-  fi
-
-  step "Waiting for ${tier_name} transfers to finish"
-
-  local any_failed=false
-  for svc in "${services[@]}"; do
-    local pid_file="${LOG_DIR}/${svc}.transfer.pid"
-    if [ ! -f "$pid_file" ]; then
-      continue
-    fi
-
-    local pid
-    pid=$(cat "$pid_file")
-    wait "$pid" 2>/dev/null || true
-
-    local status
-    status=$(cat "${LOG_DIR}/${svc}.transfer.status" 2>/dev/null || echo "UNKNOWN")
-    if [ "$status" = "OK" ]; then
-      ok "${svc} transferred successfully"
-    elif [ "$status" = "SKIP" ]; then
-      continue
-    else
-      fail "${svc} transfer failed → ${LOG_DIR}/${svc}.transfer.log"
-      any_failed=true
-    fi
-  done
-
-  if $any_failed; then
-    warn "Some transfers in ${tier_name} failed — check logs in ${LOG_DIR}/"
-  fi
+  if [ -n "$names" ]; then device_docker "$target" stop "$svc" || return 1; fi
+  for device in ${MIGRATION_STOPPED[$svc]}; do device_docker "$device" start "$svc" || return 1; done
+  unset 'MIGRATION_STOPPED[$svc]'
 }
-
-# ── Restart a tier (compose up only — images already on target) ─
-restart_tier() {
-  local tier_name="$1"
-  shift
-  local services=("$@")
-
-  # Filter to only services whose transfer (or build in seq mode) succeeded
-  local filtered=()
-  for svc in "${services[@]}"; do
-    if ! should_deploy "$svc"; then
-      echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
-      continue
-    fi
-
-    if $NO_PARALLEL; then
-      # Sequential mode: check build status (transfer hasn't run yet)
-      local build_status
-      build_status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "SKIP")
-      if [ "$build_status" = "OK" ]; then
-        filtered+=("$svc")
-      elif [ "$build_status" = "FAIL" ]; then
-        fail "${svc}: build failed — skipping"
-        echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
-      else
-        echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
-      fi
-    else
-      # Parallel mode: check transfer status
-      local transfer_status
-      transfer_status=$(cat "${LOG_DIR}/${svc}.transfer.status" 2>/dev/null || echo "SKIP")
-      if [ "$transfer_status" = "OK" ]; then
-        filtered+=("$svc")
-      elif [ "$transfer_status" = "FAIL" ]; then
-        fail "${svc}: transfer failed — skipping"
-        echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
-      else
-        # Transfer was skipped — check if the underlying build failed
-        local _underlying_build
-        _underlying_build=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "SKIP")
-        if [ "$_underlying_build" = "FAIL" ]; then
-          fail "${svc}: build failed — skipping"
-          echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
-        else
-          echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
-        fi
-      fi
-    fi
-  done
-
-  if [ ${#filtered[@]} -eq 0 ]; then
-    info "No services to restart in ${tier_name}"
-    return 0
-  fi
-
-  step "Restarting ${tier_name}: ${filtered[*]}"
-
-  if $NO_PARALLEL || [ ${#filtered[@]} -eq 1 ]; then
-    for svc in "${filtered[@]}"; do
-      if $NO_PARALLEL; then
-        # Sequential: do full deploy (transfer + restart in one shot)
-        deploy_service "$svc" "false"
-        local status
-        status=$(cat "${LOG_DIR}/${svc}.deploy.status" 2>/dev/null || echo "UNKNOWN")
-      else
-        restart_service "$svc" "false"
-        local status
-        status=$(cat "${LOG_DIR}/${svc}.restart.status" 2>/dev/null || echo "UNKNOWN")
-        echo "$status" > "${LOG_DIR}/${svc}.deploy.status"
-      fi
-      if [ "$status" = "OK" ]; then
-        ok "${svc} restarted successfully"
-      elif [ "$status" = "FAIL" ]; then
-        fail "${svc} restart failed"
-        if [ "$tier_name" = "Tier 0 — Foundation" ]; then
-          fail "Vault restart failed — aborting all subsequent tiers"
-          return 1
-        fi
-      fi
-    done
-  else
-    # Parallel restart within tier
-    local pids=()
-    for svc in "${filtered[@]}"; do
-      restart_service_throttled "$svc" "true" &
-      pids+=("$!:$svc")
-    done
-
-    local any_failed=false
-    for entry in "${pids[@]}"; do
-      local pid="${entry%%:*}"
-      local svc="${entry##*:}"
-      wait "$pid" 2>/dev/null || true
-      local status
-      status=$(cat "${LOG_DIR}/${svc}.restart.status" 2>/dev/null || echo "UNKNOWN")
-      if [ "$status" = "OK" ]; then
-        ok "${svc} restarted successfully"
-        echo "OK" > "${LOG_DIR}/${svc}.deploy.status"
-      else
-        fail "${svc} restart failed → ${LOG_DIR}/${svc}.restart.log"
-        echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
-        any_failed=true
-      fi
-    done
-
-    if $any_failed; then
-      warn "Some restarts in ${tier_name} failed — check logs in ${LOG_DIR}/"
-      # Tier 0 failure is fatal — vault must succeed
-      if [ "$tier_name" = "Tier 0 — Foundation" ]; then
-        fail "Vault restart failed — aborting all subsequent tiers"
-        return 1
-      fi
-    fi
-  fi
-}
-
-# ── Health-gate: wait for a tier to become healthy ────────────
-# After deploying a tier, poll health endpoints until all services
-# respond 2xx or timeout. Prevents boot-order races where later
-# tiers start before their dependencies are ready.
-#
-# All services are polled CONCURRENTLY in a single loop so the
-# timeout applies to the whole tier (worst case 60s total), not
-# per-service (which was N × 60s sequential).
-HEALTH_GATE_TIMEOUT=60    # seconds for the entire tier
-HEALTH_GATE_INTERVAL=3    # seconds between poll rounds
-
 wait_tier_healthy() {
-  local tier_name="$1"
-  shift
-  local services=("$@")
-
-  # Only gate services that were actually deployed
-  local to_check=()
-  for svc in "${services[@]}"; do
-    local deploy_status
-    deploy_status=$(cat "${LOG_DIR}/${svc}.deploy.status" 2>/dev/null || echo "SKIP")
-    if [ "$deploy_status" = "OK" ] && [ -n "${SVC_HEALTH_URL[$svc]:-}" ]; then
-      to_check+=("$svc")
-    fi
+  local tier="$1"; shift
+  local svc deadline=$((SECONDS + HEALTH_GATE_TIMEOUT)) code check_dir pid remaining
+  local pids=()
+  local -A pending=()
+  for svc in "$@"; do
+    if [ "${PHASE_STATUS[$svc.deploy]:-}" = OK ] && [ -n "${SVC_HEALTH_URL[$svc]:-}" ]; then pending[$svc]=1; fi
+    # An unchanged foundation still has to be available for new dependents.
+    if [ "$tier" = 0 ] && [ "${SVC_CHANGED[$svc]}" = 0 ] && [ -n "${SVC_HEALTH_URL[$svc]:-}" ]; then pending[$svc]=1; fi
   done
-
-  if [ ${#to_check[@]} -eq 0 ]; then
-    return 0
-  fi
-
-  step "Health gate — waiting for ${tier_name} services to become healthy"
-
-  # Track which services are still pending
-  declare -A pending
-  for svc in "${to_check[@]}"; do
-    pending[$svc]=1
-  done
-
-  # Deadline-based timeout so curl time counts against the budget,
-  # and pid-specific wait so we never block on unrelated background
-  # jobs (later-tier builds/transfers are still running at this point).
-  local deadline=$(( SECONDS + HEALTH_GATE_TIMEOUT ))
-  local all_healthy=true
-
-  while [ ${#pending[@]} -gt 0 ] && [ "$SECONDS" -lt "$deadline" ]; do
-    # Fire all health checks in parallel (background curl per service)
-    local check_dir
-    local curl_pids=()
-    check_dir=$(mktemp -d "${LOG_DIR}/.health-XXXXXX")
+  while [ "${#pending[@]}" -gt 0 ] && [ "$SECONDS" -lt "$deadline" ]; do
+    check_dir=$(mktemp -d "$LOG_DIR/.health.XXXXXX"); pids=()
+    remaining=$((deadline - SECONDS)); [ "$remaining" -le 3 ] || remaining=3
     for svc in "${!pending[@]}"; do
-      local url="${SVC_HEALTH_URL[$svc]}"
-      ( curl -sf --max-time 3 -o /dev/null "$url" 2>/dev/null && echo "OK" > "${check_dir}/${svc}" ) &
-      curl_pids+=("$!")
+      (
+        code=$(curl -sS --max-time "$remaining" -o /dev/null -w '%{http_code}' "${SVC_HEALTH_URL[$svc]}" 2>/dev/null) || exit 1
+        [[ "$code" == 2[0-9][0-9] ]] && : > "$check_dir/$svc"
+      ) & pids+=("$!")
     done
-    wait "${curl_pids[@]}" 2>/dev/null || true
-
-    # Collect results
-    local newly_healthy=()
+    for pid in "${pids[@]}"; do wait "$pid" || true; done
     for svc in "${!pending[@]}"; do
-      if [ -f "${check_dir}/${svc}" ]; then
-        newly_healthy+=("$svc")
-      fi
+      if [ -f "$check_dir/$svc" ]; then set_status "$svc" health OK; ok "$svc healthy"; unset 'pending[$svc]'; fi
     done
     rm -rf "$check_dir"
-
-    # Remove healthy services from the pending set
-    for svc in "${newly_healthy[@]}"; do
-      ok "${svc} healthy (${SVC_HEALTH_URL[$svc]})"
-      echo "OK" > "${LOG_DIR}/${svc}.health.status"
-      unset "pending[$svc]"
-    done
-
-    # If all healthy, we're done
-    if [ ${#pending[@]} -eq 0 ]; then
-      break
+    if [ "${#pending[@]}" -gt 0 ] && [ "$SECONDS" -lt "$deadline" ]; then
+      remaining=$((deadline - SECONDS)); [ "$remaining" -le "$HEALTH_GATE_INTERVAL" ] || remaining="$HEALTH_GATE_INTERVAL"
+      sleep "$remaining"
     fi
-
-    sleep $HEALTH_GATE_INTERVAL
   done
-
-  # Report any services that never became healthy
-  for svc in "${!pending[@]}"; do
-    warn "${svc} not healthy after ${HEALTH_GATE_TIMEOUT}s — proceeding anyway"
-    echo "UNHEALTHY" > "${LOG_DIR}/${svc}.health.status"
-    all_healthy=false
+  for svc in "${!pending[@]}"; do set_status "$svc" health UNHEALTHY; fail "$svc did not become healthy"; done
+  [ "${#pending[@]}" -eq 0 ]
+}
+finalize_service() {
+  local svc="$1" device input
+  [ "${PHASE_STATUS[$svc.deploy]:-}" = OK ] || { rollback_migration "$svc"; return 1; }
+  if [ "${PHASE_STATUS[$svc.health]:-}" = UNHEALTHY ]; then rollback_migration "$svc"; return 1; fi
+  # At this point the replacement has passed its health check. Never start the
+  # old copy again if later cleanup fails; leave it stopped for a retry.
+  unset 'MIGRATION_STOPPED[$svc]'
+  for device in ${MIGRATION_SOURCES[$svc]:-}; do
+    if ! device_docker "$device" rm "$svc" >>"$LOG_DIR/$svc.migration.log" 2>&1; then
+      set_status "$svc" deploy FAIL; warn "Could not clean up old $svc on $device"; return 1
+    fi
+    rm -f "$DEPLOY_STATE_ROOT/deployed/$device/$svc.json" "$DEPLOY_STATE_ROOT/pending/$device/$svc.json"
   done
-
-  if $all_healthy; then
-    ok "All ${tier_name} services healthy ✓"
+  snapshot_one "$svc" "$LOG_DIR/verified/$svc.json" || { set_status "$svc" deploy FAIL; return 1; }
+  node "$STATE_HELPER" matches --current "$LOG_DIR/verified/$svc.json" --previous "$LOG_DIR/inputs/$svc.json" || {
+    set_status "$svc" deploy FAIL; warn "$svc inputs changed during deployment; state was not advanced"; return 1;
+  }
+  input="$LOG_DIR/inputs/$svc.json"
+  [ "${SVC_SHARED[$svc]}" = 0 ] || input="$(state_file built "$svc")"
+  if ! node "$STATE_HELPER" record --input "$input" --output "$(state_file deployed "$svc")" --unknown-libraries "$SKIP_DEPS"; then
+    set_status "$svc" deploy FAIL; return 1
   fi
+  rm -f "$(state_file pending "$svc")"
 }
 
-# ── Timer ─────────────────────────────────────────────────────
-DEPLOY_START=$SECONDS
-
-
-# ── Header ────────────────────────────────────────────────────
-echo ""
-rule "$MAGENTA"
-printf '%s%s  🚀  Deploy All Services%s\n' "$MAGENTA" "$BOLD" "$RESET"
-printf '  %sThree-phase pipeline: build → transfer → restart%s\n' "$DIM" "$RESET"
-if $DRY_RUN; then
-  printf '%s%s  ⚠  DRY RUN — no changes will be made%s\n' "$YELLOW" "$BOLD" "$RESET"
-fi
-if [ -n "$GROUP" ]; then
-  printf '  %sGroup: %s%s\n' "$CYAN" "$GROUP" "$RESET"
-fi
-if [ -n "$ONLY" ]; then
-  printf '  %sOnly: %s%s\n' "$CYAN" "$ONLY" "$RESET"
-fi
-if [ -n "$SKIP_LIST" ]; then
-  printf '  %sSkipping: %s%s\n' "$CYAN" "$SKIP_LIST" "$RESET"
-fi
-if $CHANGED_ONLY; then
-  printf '  %sMode: changed-only (skipping unchanged services)%s\n' "$CYAN" "$RESET"
-  if ! $SKIP_DEPS && ! $NO_IMPACT; then
-    printf '  %sImpact: symbol-level library analysis on (--no-impact to disable)%s\n' "$CYAN" "$RESET"
-  fi
-fi
-if $SKIP_DEPS; then
-  printf '  %sMode: skip-deps (skipping library sync and dependency change checks)%s\n' "$CYAN" "$RESET"
-fi
-if $SKIP_TESTS; then
-  printf '%s%s  ⚠  SKIP TESTS — untested code will be built and deployed%s\n' "$YELLOW" "$BOLD" "$RESET"
-fi
+aborted=false
 if $BUILD_ONLY; then
-  printf '%s%s  ⚠  BUILD ONLY — no transfer or restart will be performed%s\n' "$YELLOW" "$BOLD" "$RESET"
-fi
-if $VAULT_CONFIG_CHANGED; then
-  printf '  %s%s⚡ projects.json changed — vault-service will be force-deployed%s\n' "$YELLOW" "$BOLD" "$RESET"
-fi
-rule "$MAGENTA"
-
-# ── Prepare log directory ─────────────────────────────────────
-mkdir -p "$LOG_DIR"
-rm -f "${LOG_DIR}"/*.log "${LOG_DIR}"/*.status "${LOG_DIR}"/*.pid "${LOG_DIR}"/.build-semaphore "${LOG_DIR}"/.ssh-semaphore 2>/dev/null
-rm -rf "${LOG_DIR}"/.health-* 2>/dev/null
-
-# Initialize build concurrency semaphore
-if ! $NO_PARALLEL; then
-  init_semaphore
-fi
-
-# ══════════════════════════════════════════════════════════════
-# PHASE 0 — LIBRARY SYNC
-# Shared libraries build their dist/ automatically via git pre-commit
-# hooks. This phase pulls latest to ensure the local developer
-# workspace is in sync and checks for any changes (remote or local)
-# to trigger downstream dependency updates.
-# ══════════════════════════════════════════════════════════════
-
-# Discover library projects dynamically (topological order scanned from package.json)
-# LIBRARY_IDS was already populated dynamically at startup
-
-if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN && ! $SKIP_DEPS; then
-  box "$YELLOW" "PHASE 0 — LIBRARY SYNC" "Pull latest shared libraries and check for changes"
-
-  # Pre-pull all libraries in parallel to reduce sequential network latency
-  declare -A PULL_OUTPUTS
-  declare -A PULLED_CHANGES
-  if ! $SKIP_PULL; then
-    step "Pre-pulling libraries in parallel"
-    pull_pids=()
-    for lib_id in "${LIBRARY_IDS[@]}"; do
-      lib_dir="${ROOT_DIR}/${lib_id}"
-      [ -d "$lib_dir" ] || continue
-      pull_log="${LOG_DIR}/${lib_id}.pull.log"
-      (cd "$lib_dir" && git pull --ff-only > "$pull_log" 2>&1) &
-      pull_pids+=("$!:$lib_id:$pull_log")
+  wait_prepared "${ALL_SERVICES[@]}"
+else
+  pump_preparation
+  if ! $DRY_RUN && [ "$changed_count" -gt 0 ]; then discover_migrations; fi
+  for ((tier=0; tier<=MAX_TIER; tier++)); do
+    read -ra tier_svcs <<< "${TIER_SERVICES[$tier]:-}"
+    [ "${#tier_svcs[@]}" -gt 0 ] || continue
+    header "Tier $tier — prepare, restart, verify"
+    wait_prepared "${tier_svcs[@]}"
+    tier_failed=false
+    for svc in "${tier_svcs[@]}"; do
+      if [ "${SVC_CHANGED[$svc]}" = 1 ] && [ "${PHASE_STATUS[$svc.transfer]:-}" != OK ]; then tier_failed=true; fi
     done
-
-    for entry in "${pull_pids[@]}"; do
-      pid="${entry%%:*}"
-      rest="${entry#*:}"
-      lib_id="${rest%%:*}"
-      pull_log="${rest#*:}"
-      wait "$pid" 2>/dev/null || true
-      if [ -f "$pull_log" ]; then
-        output=$(cat "$pull_log")
-        PULL_OUTPUTS[$lib_id]="$output"
-        if echo "$output" | grep -q -vE "Already up to date|Current branch.*is up to date|^[[:space:]]*$"; then
-          PULLED_CHANGES[$lib_id]=true
-        else
-          PULLED_CHANGES[$lib_id]=false
-        fi
-        rm -f "$pull_log"
-      else
-        PULLED_CHANGES[$lib_id]=true
+    if [ "$tier" -eq 0 ] && $tier_failed; then aborted=true; fail 'Foundation preparation failed; dependent tiers will not restart'; break; fi
+    # Bound restarts as well as transfers; unrelated preparations can finish
+    # while these jobs run, and all exits are collected by the same parent.
+    for svc in "${tier_svcs[@]}"; do
+      [ "${SVC_CHANGED[$svc]}" = 1 ] && [ "${PHASE_STATUS[$svc.transfer]:-}" = OK ] || continue
+      while :; do
+        remote_jobs=0
+        for pid in "${!JOB_PHASE[@]}"; do [ "${JOB_PHASE[$pid]}" = build ] || remote_jobs=$((remote_jobs + 1)); done
+        [ "$remote_jobs" -lt "$MAX_CONCURRENT_SSH" ] && break
+        wait_job
+      done
+      phase=restart; [ "${SVC_SHARED[$svc]}" = 1 ] || phase=deploy
+      if ! $DRY_RUN && ! stop_migration_sources "$svc"; then
+        set_status "$svc" deploy FAIL; rollback_migration "$svc" || true; tier_failed=true; continue
       fi
+      if ! launch_phase "$svc" "$phase"; then set_status "$svc" deploy FAIL; tier_failed=true; fi
     done
-  fi
-
-  ANY_LIB_CHANGED=false
-
-  for lib_id in "${LIBRARY_IDS[@]}"; do
-    lib_dir="${ROOT_DIR}/${lib_id}"
-    if [ ! -d "$lib_dir" ]; then
-      warn "${lib_id}: directory not found — skipping"
-      continue
+    while :; do
+      restarting=false
+      for pid in "${!JOB_PHASE[@]}"; do case "${JOB_PHASE[$pid]}" in restart|deploy) restarting=true ;; esac; done
+      $restarting || break
+      wait_job
+    done
+    for svc in "${tier_svcs[@]}"; do
+      [ "${SVC_CHANGED[$svc]}" = 1 ] || continue
+      if [ -n "${PHASE_STATUS[$svc.restart]:-}" ]; then set_status "$svc" deploy "${PHASE_STATUS[$svc.restart]:-}"; fi
+      [ "${PHASE_STATUS[$svc.deploy]:-}" = OK ] || tier_failed=true
+    done
+    if ! $DRY_RUN && [ "$changed_count" -gt 0 ]; then
+      wait_tier_healthy "$tier" "${tier_svcs[@]}" || tier_failed=true
+      for svc in "${tier_svcs[@]}"; do
+        [ "${SVC_CHANGED[$svc]}" = 1 ] || continue
+        finalize_service "$svc" || tier_failed=true
+      done
     fi
-
-    step "Syncing ${lib_id}"
-
-    # Print parallel pre-pulled output
-    if ! $SKIP_PULL; then
-      if [ -n "${PULL_OUTPUTS[$lib_id]:-}" ]; then
-        echo "${PULL_OUTPUTS[$lib_id]}" | sed 's/^/  /'
-      fi
-    fi
-
-    # Check for local uncommitted changes OR unpushed commits
-    _has_changes=false
-    if ! (cd "$lib_dir" && git diff --quiet HEAD -- . 2>/dev/null) || \
-       [ -n "$(cd "$lib_dir" && git ls-files --others --exclude-standard . 2>/dev/null)" ]; then
-      _has_changes=true
-    elif (cd "$lib_dir" && git rev-parse --abbrev-ref @{u} &>/dev/null) && \
-         [ "$(cd "$lib_dir" && git rev-list --count @{u}..HEAD 2>/dev/null || echo 0)" -gt 0 ]; then
-      _has_changes=true
-    fi
-
-    if [ "${PULLED_CHANGES[$lib_id]:-false}" = "true" ]; then
-      ok "${lib_id}: pulled latest changes from remote"
-      ANY_LIB_CHANGED=true
-    elif $_has_changes; then
-      info "${lib_id}: has local changes or unpushed commits (will trigger downstream rebuilds)"
-      ANY_LIB_CHANGED=true
-    else
-      ok "${lib_id}: up to date (no changes)"
-    fi
+    if $tier_failed; then aborted=true; fail "Tier $tier failed; subsequent tiers will not restart"; break; fi
   done
 fi
-
-# ══════════════════════════════════════════════════════════════
-# PHASE 0.5 — LIBRARY IMPACT ANALYSIS (symbol-level)
-# Instead of rebuilding every consumer whenever a library repo
-# gains a commit, scripts/lib-impact.js maps the changed library
-# files through the library's internal import graph to the exact
-# export surface (subpaths, barrel symbols, css) that changed,
-# then intersects that with what each service actually imports.
-# Services whose imports are untouched are skipped.
-# Anything the analysis cannot classify fails OPEN (= rebuild),
-# and any script failure falls back to the legacy behavior.
-# ══════════════════════════════════════════════════════════════
-declare -A IMPACT_VERDICT
-declare -A IMPACT_REASON
-IMPACT_SCRIPT_OK=false
-if $CHANGED_ONLY && ! $SKIP_DEPS && ! $NO_IMPACT; then
-  # Pair list "svc:lib1,lib2;svc2:lib1;..." — bash owns which libs
-  # each service tracks (SVC_LIB_DEPS); the script owns the verdicts.
-  _impact_pairs=""
+# Finish or cancel all preparation workers before global cleanup. On an abort,
+# EXIT cleanup terminates them; do not prune while they are still running.
+if ! $aborted; then
+  while [ "${#JOB_SERVICE[@]}" -gt 0 ]; do wait_job; done
+fi
+if ! $DRY_RUN && ! $aborted && [ "$changed_count" -gt 0 ]; then
+  step 'Cleaning images once per host and retaining a bounded build cache'
+  local_tags=()
   for svc in "${ALL_SERVICES[@]}"; do
-    [ -n "${SVC_LIB_DEPS[$svc]:-}" ] || continue
-    _impact_pairs="${_impact_pairs}${svc}:${SVC_LIB_DEPS[$svc]// /,};"
+    [ "${SVC_CHANGED[$svc]}" = 1 ] || continue
+    while IFS= read -r tag; do
+      case "$tag" in "$svc":latest|"$svc":previous|*:'<none>'|'') ;; *) local_tags+=("$tag") ;; esac
+    done < <(docker images "$svc" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)
   done
-
-  if [ -n "$_impact_pairs" ]; then
-    step "Analyzing library change impact (symbol-level)"
-    if _impact_eval=$(node "${SCRIPT_DIR}/scripts/lib-impact.js" \
-        --root "$ROOT_DIR" \
-        --state "$DEPLOY_STATE_DIR" \
-        --projects "$PROJECTS_JSON" \
-        --pairs "$_impact_pairs" \
-        2>"${LOG_DIR}/impact.log"); then
-      eval "$_impact_eval"
-    else
-      warn "lib-impact.js failed — using legacy whole-library change detection"
-    fi
-
-    # Surface the script's summary/warning lines
-    if [ -s "${LOG_DIR}/impact.log" ]; then
-      while IFS= read -r _impact_line; do
-        case "$_impact_line" in
-          impact-warn:*) warn "${_impact_line#impact-warn: }" ;;
-          impact:*)      info "${_impact_line#impact: }" ;;
-          *)             info "$_impact_line" ;;
-        esac
-      done < "${LOG_DIR}/impact.log"
-    fi
+  if [ "${#local_tags[@]}" -gt 0 ]; then docker rmi "${local_tags[@]}" > "$LOG_DIR/local-tags.log" 2>&1 || warn 'Some local tags could not be removed'; fi
+  run_foreground "$REMOTE_TIMEOUT" docker image prune -f > "$LOG_DIR/local-prune.log" 2>&1 || warn 'Local image cleanup failed'
+  cache_flags=(--keep-storage "$BUILD_CACHE_KEEP_STORAGE")
+  [ -z "$BUILD_CACHE_MAX_AGE" ] || cache_flags+=(--filter "until=$BUILD_CACHE_MAX_AGE")
+  run_foreground "$BUILD_PHASE_TIMEOUT" docker builder prune -f --all "${cache_flags[@]}" \
+    > "$LOG_DIR/build-cache.log" 2>&1 || warn 'Build cache cleanup failed'
+  if ! $BUILD_ONLY; then
+    for target in "${!selected_targets[@]}"; do
+      tags=()
+      for svc in "${ALL_SERVICES[@]}"; do
+        [ "${SVC_CHANGED[$svc]}" = 1 ] && [ "${SVC_DEPLOY_TARGET[$svc]}" = "$target" ] && [ "${PHASE_STATUS[$svc.deploy]:-}" = OK ] || continue
+        while IFS= read -r tag; do
+          case "$tag" in "$svc":latest|"$svc":previous|*:'<none>'|'') ;; *) tags+=("$tag") ;; esac
+        done < <(device_docker "$target" images "$svc" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)
+      done
+      if [ "${#tags[@]}" -gt 0 ]; then device_docker "$target" rmi "${tags[@]}" > "$LOG_DIR/$target.tags.log" 2>&1 || warn "Tag cleanup failed for $target"; fi
+      device_docker "$target" image prune -f > "$LOG_DIR/$target.prune.log" 2>&1 || warn "Image cleanup failed for $target"
+    done
   fi
 fi
-
-# ── Validate all services have deploy.sh ──────────────────────
-step "Pre-flight check"
-MISSING=()
+PASS=0 FAILED=0 SKIPPED=0 UNHEALTHY_COUNT=0
+header 'Deploy All — Summary'
+summary_phase=deploy; $BUILD_ONLY && summary_phase=build
 for svc in "${ALL_SERVICES[@]}"; do
-  if should_deploy "$svc"; then
-    if [ -f "${ROOT_DIR}/${svc}/deploy.sh" ]; then
-      ok "${svc}/deploy.sh"
-    else
-      fail "${svc}/deploy.sh not found"
-      MISSING+=("$svc")
-    fi
-  fi
+  result=${PHASE_STATUS[$svc.$summary_phase]:-}
+  if [ "${PHASE_STATUS[$svc.health]:-}" = UNHEALTHY ]; then
+    UNHEALTHY_COUNT=$((UNHEALTHY_COUNT + 1)); warn "$svc unhealthy"
+  elif [ "$result" = OK ]; then PASS=$((PASS + 1)); ok "$svc"
+  elif [ "$result" = FAIL ] || { [ "${SVC_CHANGED[$svc]}" = 1 ] && [ "$result" != OK ]; }; then
+    FAILED=$((FAILED + 1)); fail "$svc failed or blocked"
+  else SKIPPED=$((SKIPPED + 1)); fi
 done
-
-if [ ${#MISSING[@]} -gt 0 ]; then
-  warn "Missing deploy scripts: ${MISSING[*]}"
-  warn "These services will be skipped"
+# Edge changes are deployment actions, and only follow a successful rollout.
+if ! $DRY_RUN && ! $BUILD_ONLY && ! $aborted && [ "$FAILED" -eq 0 ] && [ "$UNHEALTHY_COUNT" -eq 0 ] && [ "$changed_count" -gt 0 ]; then
+  if ! run_foreground "$TRANSFER_PHASE_TIMEOUT" node "$SCRIPT_DIR/edge/reconcile-dns.js" --apply > "$LOG_DIR/edge-dns.log" 2>&1; then warn "Edge DNS reconciliation failed — $LOG_DIR/edge-dns.log"; fi
+  if ! run_foreground "$TRANSFER_PHASE_TIMEOUT" bash "$SCRIPT_DIR/edge/sync-config.sh" > "$LOG_DIR/edge-sync.log" 2>&1; then warn "Edge config sync failed — $LOG_DIR/edge-sync.log"; fi
 fi
-
-# ── Pre-flight: prune orphaned Docker networks on deploy targets ──
-# Docker has a limited pool of /16 subnets for bridge networks.
-# Old/renamed services leave behind orphaned networks that exhaust
-# the pool, causing "could not find an available IPv4 address pool"
-# errors during deploy. Pruning unused networks prevents this.
-if ! $DRY_RUN; then
-  # Collect unique SSH-based deploy targets
-  declare -A _prune_hosts
-  for svc in "${ALL_SERVICES[@]}"; do
-    local_target="${SVC_DEPLOY_TARGET[$svc]:-synology}"
-    local_method="${DEVICE_METHOD[$local_target]:-ssh}"
-    if [ "$local_method" = "ssh" ]; then
-      _prune_hosts[$local_target]="${DEVICE_SSH_ALIAS[$local_target]:-nas}"
-    fi
-  done
-
-  for _target_id in "${!_prune_hosts[@]}"; do
-    _ssh_host="${_prune_hosts[$_target_id]}"
-    _docker_bin="${DEVICE_DOCKER_BIN[$_target_id]:-/usr/local/bin/docker}"
-    step "Pruning orphaned Docker networks on ${_target_id} (${_ssh_host})"
-    if ssh -o ConnectTimeout=8 -o BatchMode=yes "$_ssh_host" "true" 2>/dev/null; then
-      PRUNED=$(ssh "$_ssh_host" "sudo ${_docker_bin} network prune -f 2>&1" || true)
-      PRUNED_NAMES=$(echo "$PRUNED" | grep -v "Deleted Networks:" | grep -v "Total reclaimed" | grep -v "^$" | tr '\n' ' ' || true)
-      if [ -n "$PRUNED_NAMES" ]; then
-        ok "Pruned: ${PRUNED_NAMES}"
-      else
-        ok "No orphaned networks"
-      fi
-    else
-      warn "Cannot reach ${_target_id} via SSH — skipping network prune"
-    fi
-  done
+printf '\n%d passed, %d unhealthy, %d failed, %d skipped (%ds)\n' "$PASS" "$UNHEALTHY_COUNT" "$FAILED" "$SKIPPED" "$((SECONDS - DEPLOY_START))"
+if ! $DRY_RUN && $COMPACT_WSL && ! $aborted && [ "$FAILED" -eq 0 ] && [ "$UNHEALTHY_COUNT" -eq 0 ]; then
+  bash "$SCRIPT_DIR/scripts/compact-wsl.sh"
 fi
-
-# ── Tier labels (descriptive names for output) ───────────────
-declare -A TIER_LABELS=(
-  [0]="Tier 0 — Foundation"
-  [1]="Tier 1 — Services & Clients"
-  [2]="Tier 2 — Bots"
-)
-
-# ══════════════════════════════════════════════════════════════
-# PRE-BUILD — Dangling image cleanup only
-# BuildKit cache is nuked once in Phase 3 after deploy completes.
-# Pre-build, we only clean dangling images (instant) to free
-# layer refs before the build phase starts.
-# ══════════════════════════════════════════════════════════════
-if ! $DRY_RUN; then
-  docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
-fi
-
-# ══════════════════════════════════════════════════════════════
-# PHASE 1 — BUILD ALL (fire all tiers simultaneously)
-# ══════════════════════════════════════════════════════════════
-box "$CYAN" "PHASE 1 — BUILD" "All services build in parallel across all tiers"
-
-
-# Fire all builds at once — no waiting between tiers
-for tier in $(seq 0 "$MAX_TIER"); do
-  tier_label="${TIER_LABELS[$tier]:-Tier $tier}"
-  # shellcheck disable=SC2206
-  tier_svcs=(${TIER_SERVICES[$tier]})
-  if [ ${#tier_svcs[@]} -gt 0 ]; then
-    fire_builds "$tier_label" "${tier_svcs[@]}"
-  fi
-done
-
-# Fire eager transfers — each polls for its own build, then
-# starts transferring immediately. This overlaps image transfers
-# with builds still in progress (pipeline parallelism).
-if ! $BUILD_ONLY; then
-  for tier in $(seq 0 "$MAX_TIER"); do
-    tier_label="${TIER_LABELS[$tier]:-Tier $tier}"
-    # shellcheck disable=SC2206
-    tier_svcs=(${TIER_SERVICES[$tier]})
-    if [ ${#tier_svcs[@]} -gt 0 ]; then
-      fire_transfers "$tier_label" "${tier_svcs[@]}"
-    fi
-  done
-fi
-
-if ! $NO_PARALLEL && ! $BUILD_ONLY; then
-  echo ""
-  info "All builds + transfers launched — transfers start as builds complete"
-fi
-
-# ── BUILD_ONLY: wait for all builds, report, and exit ─────────
-if $BUILD_ONLY; then
-  echo ""
-  info "Build-only mode — waiting for all builds to complete..."
-
-  # Wait for all tier builds
-  for tier in $(seq 0 "$MAX_TIER"); do
-    tier_label="${TIER_LABELS[$tier]:-Tier $tier}"
-    # shellcheck disable=SC2206
-    tier_svcs=(${TIER_SERVICES[$tier]})
-    if [ ${#tier_svcs[@]} -gt 0 ]; then
-      wait_builds "$tier_label" "${tier_svcs[@]}"
-    fi
-  done
-
-  # Summary
-  TOTAL=$((SECONDS - DEPLOY_START))
-  echo ""
-  rule "$MAGENTA"
-  printf '%s%s  🔨  Build Only — Summary%s\n' "$MAGENTA" "$BOLD" "$RESET"
-  rule "$MAGENTA"
-
-  PASS=0
-  FAILED=0
-  SKIPPED=0
-
-  for svc in "${ALL_SERVICES[@]}"; do
-    local_status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "SKIP")
-    svc_clr="${SVC_COLORS[$svc]:-$DIM}"
-    case "$local_status" in
-      OK)   printf '  %s✔ %s%s\n' "$svc_clr" "$svc" "$RESET"; PASS=$((PASS + 1)) ;;
-      FAIL) printf '  %s✖ %s%s  →  %s %s(build failed)%s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.build.log" "$DIM" "$RESET"; FAILED=$((FAILED + 1)) ;;
-      *)    printf '  %s⊘ %s (skipped)%s\n' "$DIM" "$svc" "$RESET"; SKIPPED=$((SKIPPED + 1)) ;;
-    esac
-  done
-
-  echo ""
-  printf '  %s%s passed%s  %s%s failed%s  %s%s skipped%s\n' "$GREEN" "$PASS" "$RESET" "$RED" "$FAILED" "$RESET" "$DIM" "$SKIPPED" "$RESET"
-  printf '  %sTotal: %dm %02ds%s\n' "$DIM" "$((TOTAL / 60))" "$((TOTAL % 60))" "$RESET"
-  printf '  %s%s%s\n' "$DIM" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$RESET"
-  echo ""
-  rule "$MAGENTA"
-
-  [ "$FAILED" -eq 0 ]
-  exit
-fi
-
-# ══════════════════════════════════════════════════════════════
-# PRE-DEPLOY — Cross-device orphan container teardown
-# When a project moves between devices (e.g. synology → workstation2),
-# the old container would keep running. Before deploying, check ALL
-# Docker-capable devices (except the target) for a container with
-# the same name and tear it down.
-# ══════════════════════════════════════════════════════════════
-if ! $DRY_RUN && [ ${#DOCKER_DEVICES[@]} -gt 1 ]; then
-  box "$YELLOW" "PRE-DEPLOY — Cross-device orphan teardown" "Checking other devices for stale containers"
-
-  # Fetch each device's full container list ONCE (also serves as the
-  # reachability probe). Membership checks then happen in bash — this
-  # replaces one SSH/docker round-trip per service per device.
-  declare -A _device_reachable
-  declare -A _device_containers   # device-id -> newline-separated container names
-  for _dev in "${DOCKER_DEVICES[@]}"; do
-    _dev_method="${DEVICE_METHOD[$_dev]:-ssh}"
-    _names=""
-    if [ "$_dev_method" = "docker-api" ]; then
-      _dev_api="${DEVICE_DOCKER_API[$_dev]:-}"
-      if [ -n "$_dev_api" ] && _names=$(docker -H "$_dev_api" ps -a --format '{{.Names}}' 2>/dev/null); then
-        _device_reachable[$_dev]="true"
-      else
-        _device_reachable[$_dev]="false"
-        warn "Cannot reach ${_dev} via Docker API — skipping orphan check"
-      fi
-    else
-      _dev_ssh="${DEVICE_SSH_ALIAS[$_dev]:-}"
-      _dev_docker_bin="${DEVICE_DOCKER_BIN[$_dev]:-/usr/local/bin/docker}"
-      if [ -n "$_dev_ssh" ] && _names=$(ssh -o ConnectTimeout=8 -o BatchMode=yes "$_dev_ssh" "sudo ${_dev_docker_bin} ps -a --format '{{.Names}}'" 2>/dev/null); then
-        _device_reachable[$_dev]="true"
-      else
-        _device_reachable[$_dev]="false"
-        warn "Cannot reach ${_dev} via SSH — skipping orphan check"
-      fi
-    fi
-    _device_containers[$_dev]="$_names"
-  done
-
-  for svc in "${ALL_SERVICES[@]}"; do
-    should_deploy "$svc" || continue
-
-    local_target="${SVC_DEPLOY_TARGET[$svc]:-synology}"
-
-    for _dev in "${DOCKER_DEVICES[@]}"; do
-      # Skip the device this service is deploying TO
-      [ "$_dev" = "$local_target" ] && continue
-      # Skip unreachable devices
-      [ "${_device_reachable[$_dev]:-false}" = "true" ] || continue
-      # Skip devices that don't have a container by this exact name
-      case $'\n'"${_device_containers[$_dev]}"$'\n' in
-        *$'\n'"$svc"$'\n'*) ;;
-        *) continue ;;
-      esac
-
-      warn "Found orphan container '${svc}' on ${_dev} — tearing down"
-      _dev_method="${DEVICE_METHOD[$_dev]:-ssh}"
-
-      if [ "$_dev_method" = "docker-api" ]; then
-        _dev_api="${DEVICE_DOCKER_API[$_dev]:-}"
-        docker -H "$_dev_api" rm -f "$svc" 2>/dev/null || true
-        # Also try compose down if a compose dir exists
-        _dev_compose_root="${DEVICE_COMPOSE_ROOT[$_dev]:-}"
-        if [ -n "$_dev_compose_root" ]; then
-          DOCKER_HOST="$_dev_api" docker compose -f "${_dev_compose_root}/${svc}/docker-compose.yml" down --remove-orphans 2>/dev/null || true
-        fi
-      else
-        _dev_ssh="${DEVICE_SSH_ALIAS[$_dev]:-}"
-        _dev_docker_bin="${DEVICE_DOCKER_BIN[$_dev]:-/usr/local/bin/docker}"
-        _dev_compose_root="${DEVICE_COMPOSE_ROOT[$_dev]:-}"
-        if [ -n "$_dev_compose_root" ]; then
-          ssh "$_dev_ssh" "cd '${_dev_compose_root}/${svc}' 2>/dev/null && sudo ${_dev_docker_bin} compose down --remove-orphans 2>&1 || sudo ${_dev_docker_bin} rm -f '${svc}' 2>&1" 2>/dev/null || true
-        else
-          ssh "$_dev_ssh" "sudo ${_dev_docker_bin} rm -f '${svc}'" 2>/dev/null || true
-        fi
-      fi
-      ok "Orphan '${svc}' removed from ${_dev}"
-    done
-  done
-
-  ok "Cross-device orphan check complete"
-fi
-
-# ══════════════════════════════════════════════════════════════
-# PHASE 2 — WAIT & RESTART IN ORDER
-# ══════════════════════════════════════════════════════════════
-box "$GREEN" "PHASE 2 — RESTART" "Wait for transfers, then restart tier-by-tier"
-
-
-for tier in $(seq 0 "$MAX_TIER"); do
-  tier_label="${TIER_LABELS[$tier]:-Tier $tier}"
-  # shellcheck disable=SC2206
-  tier_svcs=(${TIER_SERVICES[$tier]})
-  if [ ${#tier_svcs[@]} -eq 0 ]; then
-    continue
-  fi
-
-  header "━━━ ${tier_label} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-  # Wait for this tier's transfers to land on the target
-  wait_transfers "$tier_label" "${tier_svcs[@]}"
-
-  # Restart containers (images are already on target)
-  if ! restart_tier "$tier_label" "${tier_svcs[@]}"; then
-    if [ "$tier" -eq 0 ]; then
-      fail "Aborting deployment — foundation tier failed"
-      exit 1
-    fi
-  fi
-
-  # Health-gate: wait for this tier's services to become healthy
-  # before restarting the next tier (skip for the last tier).
-  if [ "$tier" -lt "$MAX_TIER" ] && ! $DRY_RUN; then
-    wait_tier_healthy "$tier_label" "${tier_svcs[@]}"
-  fi
-done
-
-
-# ══════════════════════════════════════════════════════════════
-# PHASE 3 — LOCAL IMAGE CLEANUP
-# Remove SHA-tagged images (keep only :latest per service for
-# --changed-only SHA label detection), prune dangling layers,
-# and clear BuildKit build cache to prevent WSL2 VHDX growth.
-# ══════════════════════════════════════════════════════════════
-if ! $DRY_RUN; then
-  box "$YELLOW" "PHASE 3 — LOCAL IMAGE CLEANUP" "Remove stale tags, dangling layers, and build cache"
-
-  # Remove all tags except :latest (needed for --changed-only).
-  # One docker listing + one batched rmi instead of a call per service.
-  declare -A _svc_set
-  for svc in "${ALL_SERVICES[@]}"; do _svc_set[$svc]=1; done
-  stale_tags=()
-  while IFS=: read -r _repo _tag; do
-    if [ -n "${_svc_set[$_repo]:-}" ] && [ "$_tag" != "latest" ]; then
-      stale_tags+=("${_repo}:${_tag}")
-    fi
-  done < <(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)
-
-  CLEANED=${#stale_tags[@]}
-  if [ "$CLEANED" -gt 0 ]; then
-    docker rmi "${stale_tags[@]}" >/dev/null 2>&1 || true
-  fi
-
-  # Prune dangling images
-  PRUNE_OUTPUT=$(docker image prune -f 2>/dev/null || true)
-  RECLAIMED=$(echo "$PRUNE_OUTPUT" | grep 'Total reclaimed space' || echo "0B reclaimed")
-
-  if [ "$CLEANED" -gt 0 ]; then
-    ok "Removed ${CLEANED} stale local image tags — ${RECLAIMED}"
-  else
-    ok "No stale local images to clean"
-  fi
-
-  # ── Prune BuildKit build cache ──────────────────────────────
-  # Nuke all build cache after deploy. This is the ONLY cache prune
-  # in the pipeline (pre-build prune was removed — it was redundant).
-  # Every deploy gets cold builds, but prevents unbounded VHDX growth.
-  step "Pruning all BuildKit build cache"
-  BUILDER_PRUNE_OUTPUT=$(docker builder prune -f --all 2>/dev/null || true)
-  BUILDER_RECLAIMED=$(echo "$BUILDER_PRUNE_OUTPUT" | grep 'Total reclaimed space' || echo "0B reclaimed")
-  ok "Build cache pruned — ${BUILDER_RECLAIMED}"
-
-  # ── Optional: compact WSL2 VHDX ─────────────────────────────
-  # Docker data lives in WSL2's ext4.vhdx which grows but never
-  # auto-shrinks. After pruning, reclaim Windows disk space by
-  # compacting the VHDX via PowerShell. Use --compact-wsl flag.
-  if $COMPACT_WSL; then
-    step "Compacting WSL2 virtual disk (VHDX)"
-    # Find the Docker Desktop VHDX path
-    _raw_vhdx_path=$(find /mnt/c/Users/*/AppData/Local/Docker/wsl/disk -name 'docker_data.vhdx' 2>/dev/null | head -1)
-    VHDX_PATH=$(wslpath -w "$_raw_vhdx_path" 2>/dev/null || true)
-    if [ -z "$VHDX_PATH" ]; then
-      # Fallback: try the standard docker-desktop-data distro path
-      _ps_command="Get-ChildItem -Path \$env:LOCALAPPDATA\\Docker\\wsl\\disk -Filter 'docker_data.vhdx' -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1"
-      VHDX_PATH=$(powershell.exe -Command "$_ps_command" 2>/dev/null | tr -d '\r' || true)
-    fi
-    if [ -n "$VHDX_PATH" ]; then
-      info "VHDX: ${VHDX_PATH}"
-      info "Shutting down WSL to release locks..."
-      wsl.exe --shutdown 2>/dev/null || true
-      sleep 3
-      # Compact via PowerShell (no interactive diskpart needed)
-      powershell.exe -Command "Optimize-VHD -Path '${VHDX_PATH}' -Mode Full" 2>/dev/null && \
-        ok "VHDX compacted successfully" || \
-        warn "VHDX compaction failed — you may need to run as Administrator"
-    else
-      warn "Could not locate Docker VHDX — skipping compaction"
-      info "You can compact manually: wsl --shutdown && diskpart → select vdisk → compact vdisk"
-    fi
-  fi
-fi
-
-
-# ── Summary ───────────────────────────────────────────────────
-TOTAL=$((SECONDS - DEPLOY_START))
-
-echo ""
-rule "$MAGENTA"
-printf '%s%s  ☀️  Deploy All — Summary%s\n' "$MAGENTA" "$BOLD" "$RESET"
-rule "$MAGENTA"
-
-PASS=0
-FAILED=0
-SKIPPED=0
-UNHEALTHY_COUNT=0
-
-for svc in "${ALL_SERVICES[@]}"; do
-  local_status=$(cat "${LOG_DIR}/${svc}.deploy.status" 2>/dev/null || echo "SKIP")
-  svc_clr="${SVC_COLORS[$svc]:-$DIM}"
-  case "$local_status" in
-    OK)
-      if [ "$(cat "${LOG_DIR}/${svc}.health.status" 2>/dev/null)" = "UNHEALTHY" ]; then
-        printf '  %s⚠ %s (unhealthy)%s\n' "$YELLOW" "$svc" "$RESET"
-        UNHEALTHY_COUNT=$((UNHEALTHY_COUNT + 1))
-      else
-        printf '  %s✔ %s%s\n' "$svc_clr" "$svc" "$RESET"
-        PASS=$((PASS + 1))
-      fi
-      ;;
-    FAIL)
-      # Show correct log based on what actually failed
-      if [ -f "${LOG_DIR}/${svc}.deploy.log" ]; then
-        printf '  %s✖ %s%s  →  %s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.deploy.log"
-      elif [ "$(cat "${LOG_DIR}/${svc}.restart.status" 2>/dev/null)" = "FAIL" ]; then
-        printf '  %s✖ %s%s  →  %s %s(restart failed)%s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.restart.log" "$DIM" "$RESET"
-      elif [ "$(cat "${LOG_DIR}/${svc}.transfer.status" 2>/dev/null)" = "FAIL" ]; then
-        printf '  %s✖ %s%s  →  %s %s(transfer failed)%s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.transfer.log" "$DIM" "$RESET"
-      else
-        printf '  %s✖ %s%s  →  %s %s(build failed)%s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.build.log" "$DIM" "$RESET"
-      fi
-      FAILED=$((FAILED + 1))
-      ;;
-    *)    printf '  %s⊘ %s (skipped)%s\n' "$DIM" "$svc" "$RESET"; SKIPPED=$((SKIPPED + 1)) ;;
-  esac
-done
-
-# ── Edge DNS + config sync ───────────────────────────────────
-# Registry domain changes reach DNS and the live edge proxy on every
-# deploy: reconcile records first (create new, prune ownership-manifest
-# entries no longer in the registry — see edge/dns-ownership.json), then
-# hot-reload routes so certs can issue for new names. Best-effort: an
-# edge hiccup must never fail the service deploy run. Both steps no-op
-# unless the edge is enabled (+ proxyMode caddy for the route sync).
-if edge_dns_output=$(node "${SCRIPT_DIR}/edge/reconcile-dns.js" --apply 2>&1); then
-  edge_dns_summary=$(printf '%s\n' "$edge_dns_output" | grep -E "in place|created|pruned" | tail -1)
-  [ -n "$edge_dns_summary" ] && printf '  %sedge dns: %s%s\n' "$DIM" "$edge_dns_summary" "$RESET"
-else
-  printf '  %s⚠ edge dns reconcile reported conflicts (services deployed fine) — run npm run edge:dns:check%s\n' "$YELLOW" "$RESET"
-fi
-if edge_sync_output=$(bash "${SCRIPT_DIR}/edge/sync-config.sh" 2>&1); then
-  [ -n "$edge_sync_output" ] && printf '  %s%s%s\n' "$DIM" "$edge_sync_output" "$RESET"
-else
-  printf '  %s⚠ edge config sync failed (services deployed fine): %s%s\n' "$YELLOW" "$edge_sync_output" "$RESET"
-fi
-
-echo ""
-summary_msg=""
-if [ "$UNHEALTHY_COUNT" -gt 0 ]; then
-  summary_msg="${GREEN}${PASS} passed${RESET}  ${YELLOW}${UNHEALTHY_COUNT} unhealthy${RESET}  ${RED}${FAILED} failed${RESET}  ${DIM}${SKIPPED} skipped${RESET}"
-else
-  summary_msg="${GREEN}${PASS} passed${RESET}  ${RED}${FAILED} failed${RESET}  ${DIM}${SKIPPED} skipped${RESET}"
-fi
-printf '  %b\n' "$summary_msg"
-printf '  %sTotal: %dm %02ds%s\n' "$DIM" "$((TOTAL / 60))" "$((TOTAL % 60))" "$RESET"
-printf '  %s%s%s\n' "$DIM" "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$RESET"
-echo ""
-if [ "$UNHEALTHY_COUNT" -gt 0 ]; then
-  printf '  %s%s⚠  WARNING: Some services were deployed successfully but failed their health checks!%s\n' "$YELLOW" "$BOLD" "$RESET"
-  echo ""
-fi
-rule "$MAGENTA"
-
-# Non-zero exit if anything failed
-[ "$FAILED" -eq 0 ]
+! $aborted && [ "$FAILED" -eq 0 ] && [ "$UNHEALTHY_COUNT" -eq 0 ]

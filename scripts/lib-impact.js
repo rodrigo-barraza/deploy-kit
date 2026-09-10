@@ -75,9 +75,11 @@ if (!ROOT_DIR || !STATE_DIR || !PAIRS_ARG) {
 // (e.g. portal-client, whose prebuild codegen catalogs the entire
 // library surface regardless of what it imports).
 const projectOverrides = {};
+const projectTargets = {};
 try {
   const config = JSON.parse(fs.readFileSync(PROJECTS_JSON, 'utf8'));
   for (const project of config.projects || []) {
+    projectTargets[project.id] = project.deployTarget || 'synology';
     if (project.libImpact) projectOverrides[project.id] = project.libImpact;
   }
 } catch (err) { /* overrides are optional; absence is fine */ }
@@ -588,15 +590,12 @@ function scanConsumerUsage(serviceId, packageName) {
 // STATE: per-service saved base SHAs (.deploy-state/<svc>.deps.sha)
 // ══════════════════════════════════════════════════════════════
 function readSavedBases(serviceId) {
-  const bases = {};
   try {
-    const content = fs.readFileSync(path.join(STATE_DIR, `${serviceId}.deps.sha`), 'utf8');
-    for (const line of content.split('\n')) {
-      const match = line.match(/^(\S+):\s*([0-9a-f]{7,40})/);
-      if (match) bases[match[1]] = match[2];
-    }
-  } catch { /* no marker yet — bash bootstraps it; treated as in-sync */ }
-  return bases;
+    const file = path.join(STATE_DIR, projectTargets[serviceId] || 'synology', `${serviceId}.json`);
+    const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (state.version !== 2) return {};
+    return Object.fromEntries(Object.entries(state.libraries || {}).map(([id, data]) => [id, data.sha]));
+  } catch { return {}; } // Missing verified state must rebuild, never bootstrap as deployed.
 }
 
 // Which libraries import which other libraries (for two-hop)?
@@ -668,7 +667,7 @@ for (const [serviceId, libIds] of servicePairs) {
     }
 
     const base = OVERRIDE_BASES[libId] || savedBases[libId];
-    if (!base) continue; // no marker — bash bootstraps as in-sync (existing behavior)
+    if (!base) { anyAffected = true; reasons.push(`${libId}: no verified dependency state`); continue; }
 
     const head = currentHead(libId);
     if (!head) { anyAffected = true; reasons.push(`${libId}: git unavailable`); continue; }

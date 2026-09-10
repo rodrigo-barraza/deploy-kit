@@ -33,7 +33,7 @@ const MANIFEST_PATH = path.join(EDGE_DIR, "dns-ownership.json");
 const registry = JSON.parse(fs.readFileSync(process.env.PROJECTS_JSON_PATH || path.join(ROOT_DIR, "vault-service", "projects.json"), "utf8"));
 const config = require("./edge-config.js").loadEdgeConfig();
 
-const apply = process.argv.includes("--apply") && config.enabled;
+const apply = process.argv.includes("--apply") && !process.argv.includes("--dry-run") && config.enabled;
 if (process.argv.includes("--apply") && !config.enabled) {
   console.log("⚠ edge config has enabled:false — forcing dry-run.\n");
 }

@@ -17,7 +17,9 @@ DISPLAY_NAME="🔷 Prism"
 source "${SCRIPT_DIR}/../deploy-kit/lib.sh"
 ```
 
-The library handles the full pipeline: flag parsing, git pull, Docker build, SSH transfer, container restart, image pruning, and SMB fallback.
+The library handles validation, dependency installation, tests, image builds, transfers, and container updates. The orchestrator owns scheduling, health gates, deployment state, and cleanup. A failed prerequisite or health check produces a nonzero exit; later tiers do not restart after a failed tier.
+
+The orchestrator requires Bash 5.1+, Node.js, Git, Docker, curl, and the Linux/WSL tools `flock`, `setsid`, and `timeout`. SSH targets also require an SSH agent and access to their configured host. The test suite uses Python 3's standard library.
 
 ## Usage
 
@@ -79,13 +81,18 @@ npm run deploy -- --skip=lupos-bot,lights-service
 
 | Flag | Description |
 |---|---|
-| `--dry-run` | Validate only, no changes |
+| `--dry-run` | Validate local files and show the plan; skip hooks, pulls, agents, builds, and remote changes |
 | `--skip-pull` | Skip git pull |
 | `--skip-tests` | Skip each repo's test suite — **deploys untested code** (also `SKIP_TESTS=true`) |
 | `--no-cache` | Rebuild images from scratch |
-| `--no-parallel` | Disable parallel builds |
-| `--changed-only` | Only build+deploy services with git changes |
-| `--skip-deps` | Skip library build and dependency change checks |
+| `--no-parallel` | Run build, transfer, and restart work sequentially |
+| `--max-builds=N` | Maximum concurrent builds, from 1 to 64; defaults to 6, or 4 on WSL |
+| `--build-only` | Build local images; no remote preparation, transfer, restart, or edge changes |
+| `--changed-all` | Changed-only deployment including the temporary skip list |
+| `--ignore-temp-skip` | Include temporarily excluded projects |
+| `--compact-wsl` | After success, launch disk compaction in a separate elevated Windows window; WSL will shut down |
+| `--changed-only` | Only build+deploy services whose source, configuration, or dependencies changed |
+| `--skip-deps` | Skip library synchronization and dependency change checks |
 | `--no-impact` | Disable symbol-level library impact analysis (any lib commit rebuilds all consumers) |
 | `--only=a,b` | Deploy only these specific services |
 | `--skip=a,b` | Skip these specific services |
@@ -94,6 +101,56 @@ npm run deploy -- --skip=lupos-bot,lights-service
 | `--bots` | Deploy all `*-bot` services |
 | `--vault` | Deploy `vault-service` only |
 | `--group=x,y` | Deploy by category (`client`, `service`, `bot`, `vault`) |
+
+## Deployment state and retries
+
+`--changed-only` compares against the last **healthy deployment on the selected target**. Local image labels do not certify a rollout. State is written atomically under `.deploy-state/deployed/<target>/<service>.json`; build receipts live under `.deploy-state/built/<target>/<service>.json`. Receipts contain source and configuration hashes, library revisions, and image IDs; they contain no environment-file contents or secret values.
+
+A build-only run does not advance deployment state. After a failed transfer or restart, rerunning the same deployment reuses a verified matching local image and retries the rollout. A missing/replaced local image, changed source/configuration, or `--no-cache` triggers a build. An image built with `--skip-tests` is rebuilt with tests on a later normal run before it can be reused. Changes made during a build or deployment prevent its receipt from advancing. A pending receipt forces retries after failed or interrupted mutations, even if the source is subsequently reverted; standalone deployment attempts also set this marker. Only a healthy rollout clears it.
+
+The older `.sha` and `.deps.sha` files are not trusted as rollout receipts because they were written before deployment completed. **The first changed-only deployment after this update redeploys selected services once** to establish verified state. No manual deletion is required.
+
+Unless `--skip-pull` is set, the registry and selected repositories are pulled before change detection. Repository pulls have bounded concurrency; newly discovered transitive libraries are also synchronized before planning. In changed-only mode, a registry change includes Vault before dependent deployments, even with a group or `--only` filter; explicitly skipping Vault in that situation fails. An unchanged foundation must still pass its health gate. All deployed tiers, including the last tier, are checked. HTTP checks require 2xx; redirects do not count as healthy.
+
+`--skip-deps` skips shared-library synchronization and dependency change checks. A build performed this way does not certify library revisions; a later normal deployment may rebuild to verify them. `--only` bypasses the temporary skip list, while an explicit `--skip` still excludes the service. Unknown flags, groups, service IDs, and invalid concurrency values fail before deployment actions.
+
+## Failure recovery and diagnostics
+
+One lock covers the workspace, including linked worktrees and standalone service scripts. Each run has a separate directory under `.deploy-logs/`; dry-run diagnostics go to a temporary directory. The printed log path includes phase output and complete `<service>.docker.log` files. Existing logs are not erased at startup.
+
+The parent collects every worker's exit code, including unexpected termination. Each build, transfer, and restart has a deadline. Cancellation terminates only process sessions created by this deployment and restores staged local environment files. Agent processes started by the script are also cleaned up.
+
+When a service moves devices, the old container remains running during preparation. After a successful build/transfer, the script stops it, starts the replacement, and checks health. Failure restores the old container after confirming the replacement is stopped; success removes the old container and records the new target. If a device becomes unreachable during recovery, the retained container and migration log provide the recovery path; the run fails instead of reporting success.
+
+Shared wrappers update services with `docker compose up -d --remove-orphans --no-build --pull never`, avoiding an unconditional `down`. Docker container health checks and registry HTTP checks both participate in validation. An automatic SSH deployment cannot fall back to an uncompleted SMB export and report success. Standalone SMB export still provides manual recovery instructions and returns failure until those steps are completed.
+
+Legacy wrappers without the shared library are validated with their dry-run mode during preparation; their full deployment runs in the restart tier. They are never passed unsupported transfer/restart-only modes, and a build-only run does not execute their remote image pulls.
+
+## Resource limits and worktrees
+
+Cleanup runs once locally and once per selected deployment host after workers finish. Local `:latest` and remote `:latest`/`:previous` references are retained. Build cache cleanup uses Docker's [storage retention option](https://docs.docker.com/reference/cli/docker/builder/prune/), retaining 20GB by default instead of discarding all cache. An optional minimum age further restricts which entries may be evicted; it can allow recent cache to exceed the storage target.
+
+| Environment variable | Default | Purpose |
+|---|---|---|
+| `BUILD_PHASE_TIMEOUT` | `1800` | Entire service build phase, including setup and tests, in seconds |
+| `BUILD_TIMEOUT` | `600` | Docker build itself, in seconds |
+| `TRANSFER_PHASE_TIMEOUT` | `600` | Image transfer phase, in seconds |
+| `RESTART_PHASE_TIMEOUT` | `180` | Container update phase, in seconds |
+| `REMOTE_TIMEOUT` | `30` | Remote preflight, cleanup, and migration command timeout |
+| `HEALTH_GATE_TIMEOUT` | `60` | HTTP health budget for an entire tier |
+| `HEALTH_GATE_INTERVAL` | `3` | Delay between health rounds |
+| `MAX_CONCURRENT_SSH` | `8` | Concurrent repository pulls and transfer/restart workers |
+| `DEPLOY_COMPRESSION_THREADS` | `2` | Threads per pigz compressor |
+| `BUILD_CACHE_KEEP_STORAGE` | `20GB` | Cache storage to retain |
+| `BUILD_CACHE_MAX_AGE` | unset | Optional eviction age filter, e.g. `168h` |
+
+A linked deploy-kit worktree uses its own code while locating sibling repositories, shared configuration, and persistent state through the primary checkout. `DEPLOY_ROOT_DIR`, `DEPLOY_CONFIG_DIR`, `DEPLOY_STATE_ROOT`, and `PROJECTS_JSON_PATH` provide explicit overrides. Existing per-service wrappers continue to work through the runner's shared-library source adapter.
+
+`--compact-wsl` launches a detached Windows process containing the compaction commands before WSL stops. It may request Windows elevation and reports errors in its own window. Run it only when shutting down WSL is intended.
+
+## Tests
+
+Run `npm test` (or `python3 -m unittest discover -s tests -p test_deploy.py -v`). The suite runs the actual Bash and Node code using temporary local Git repositories and mocked Docker, SSH, DNS, HTTP, and package-manager commands. It does not contact deployment targets. Coverage includes failed prerequisites, retries, migration recovery, health gates, cancellation, locking, concurrency, library impact, worktrees, and dry runs.
 
 ## Library Impact Analysis
 
@@ -118,7 +175,7 @@ files). Only services whose imports are touched rebuild.
   its prebuild codegen catalogs the whole library surface).
 - Skipped services log the reason:
   `Skipping rod-dev-client — components-library: 2 files (InputComponent.tsx, …) — not imported`.
-- Debug: `node scripts/lib-impact.js --root .. --state .deploy-state \`
+- Debug: `node scripts/lib-impact.js --root .. --state .deploy-state/deployed \`
   `--projects ../vault-service/projects.json --pairs "svc:lib,..." --human`
   (add `--override-base <lib>=<sha>` to simulate a base).
 

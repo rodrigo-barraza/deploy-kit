@@ -8,6 +8,13 @@
 # reach the live edge automatically; also available as `npm run edge:sync`.
 set -euo pipefail
 
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) echo 'edge: dry run — config sync skipped'; exit 0 ;;
+    *) echo "Unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+
 EDGE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 read -r ENABLED PROXY_MODE COMPOSE_DIR < <(node -e "

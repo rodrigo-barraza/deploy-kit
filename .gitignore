@@ -22,3 +22,6 @@ edge/generated/
 # deployment's reconciler manages). Rebuilt by adoption if lost; never commit
 # one user's DNS into the shared repo.
 edge/dns-ownership.json
+
+# Python regression test bytecode
+__pycache__/

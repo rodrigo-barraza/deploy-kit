@@ -32,6 +32,8 @@
 #   npm run deploy -- --no-cache
 # ============================================================
 
+set -euo pipefail
+
 # ── Guard ─────────────────────────────────────────────────────
 if [ -z "${IMAGE_NAME:-}" ]; then
   echo "ERROR: IMAGE_NAME must be set before sourcing lib.sh" >&2
@@ -51,25 +53,6 @@ BUILD_TAIL_LINES="${BUILD_TAIL_LINES:-5}"
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-600}"
 SKIP_ENV_DEPLOY="${SKIP_ENV_DEPLOY:-false}"
 
-# ── SSH agent (for --ssh default in docker build) ─────────────
-# BuildKit forwards the host SSH agent into RUN --mount=type=ssh
-# layers so pnpm/git can authenticate to private GitHub repos.
-if [ -n "${SSH_AUTH_SOCK:-}" ]; then
-  ssh_status=0
-  ssh-add -l >/dev/null 2>&1 || ssh_status=$?
-  if [ $ssh_status -eq 2 ]; then
-    unset SSH_AUTH_SOCK
-  fi
-fi
-
-if [ -z "${SSH_AUTH_SOCK:-}" ]; then
-  eval "$(ssh-agent -s)" > /dev/null 2>&1
-  _STARTED_SSH_AGENT=true
-fi
-if ! ssh-add -l > /dev/null 2>&1; then
-  ssh-add 2> /dev/null || true
-fi
-
 # ── BuildKit (default driver) ─────────────────────────────────
 # Docker 23+ embeds BuildKit directly in dockerd. The default
 # `docker` driver supports all BuildKit features (--ssh, --mount,
@@ -80,7 +63,7 @@ fi
 # ── Compression ───────────────────────────────────────────────
 # Prefer pigz (parallel gzip) for 3-5x faster image compression
 if command -v pigz &>/dev/null; then
-  GZIP_CMD="pigz"
+  GZIP_CMD="pigz -p ${DEPLOY_COMPRESSION_THREADS:-2}"
 else
   GZIP_CMD="gzip"
 fi
@@ -123,8 +106,18 @@ for arg in "$@"; do
     --deploy-only)    DEPLOY_ONLY=true ;;
     --transfer-only)  TRANSFER_ONLY=true ;;
     --restart-only)   RESTART_ONLY=true ;;
+    --skip-tray-app)
+      # workspace-service consumes this documented wrapper-specific flag.
+      [ "$IMAGE_NAME" = workspace-service ] || { echo "ERROR: Unsupported option for $IMAGE_NAME: $arg" >&2; exit 2; }
+      SKIP_TRAY_APP=true ;;
+    *) echo "ERROR: Unknown deployment option: $arg" >&2; exit 2 ;;
   esac
 done
+
+if { $BUILD_ONLY && { $DEPLOY_ONLY || $TRANSFER_ONLY || $RESTART_ONLY; }; } || { $TRANSFER_ONLY && $RESTART_ONLY; }; then
+  echo 'ERROR: Conflicting deployment modes' >&2
+  exit 2
+fi
 
 # --transfer-only and --restart-only are sub-modes of deploy
 # (they skip the build phase just like --deploy-only)
@@ -138,6 +131,51 @@ source "${DEPLOY_KIT_DIR}/colors.sh"
 
 # Override fail() to also exit (lib.sh is fatal on failure)
 fail()  { printf '%s   %s✖ %s%s\n' "$(ts)" "$RED" "$1" "$RESET"; exit 1; }
+
+source "${DEPLOY_KIT_DIR}/scripts/runtime.sh"
+deploy_paths "$DEPLOY_KIT_DIR"
+positive_integer BUILD_TIMEOUT "$BUILD_TIMEOUT"
+positive_integer BUILD_TAIL_LINES "$BUILD_TAIL_LINES" 10000
+positive_integer DEPLOY_COMPRESSION_THREADS "${DEPLOY_COMPRESSION_THREADS:-2}" 64
+[[ "$IMAGE_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || fail 'Invalid IMAGE_NAME'
+DEPLOY_STARTED_AGENT=false
+DEPLOY_ENV_STAGED=false
+DEPLOY_ENV_BACKUP=''
+ticker_pid=''
+restore_deploy_env() {
+  if $DEPLOY_ENV_STAGED; then
+    if [ -n "$DEPLOY_ENV_BACKUP" ]; then mv -f "$DEPLOY_ENV_BACKUP" "${SCRIPT_DIR}/.env"
+    else rm -f "${SCRIPT_DIR}/.env"; fi
+    DEPLOY_ENV_STAGED=false
+  fi
+}
+stop_build_ticker() {
+  if [ -n "$ticker_pid" ]; then kill "$ticker_pid" 2>/dev/null || true; wait "$ticker_pid" 2>/dev/null || true; ticker_pid=''; fi
+}
+cleanup_service() {
+  local status=$?
+  stop_build_ticker
+  restore_deploy_env
+  if $DEPLOY_STARTED_AGENT; then ssh-agent -k >/dev/null 2>&1 || true; fi
+  return "$status"
+}
+trap cleanup_service EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ "${DEPLOY_ORCHESTRATED:-false}" != true ]; then acquire_deploy_lock; fi
+if ! $DRY_RUN; then
+  if [ -z "${DEPLOY_LOG_DIR:-}" ]; then
+    mkdir -p "${DEPLOY_KIT_DIR}/.deploy-logs"
+    DEPLOY_LOG_DIR=$(mktemp -d "${DEPLOY_KIT_DIR}/.deploy-logs/standalone.XXXXXX")
+  fi
+  start_deploy_agent
+fi
+# Older hooks use DEPLOY_KIT_DIR to locate the shared .env.deploy. Keep that
+# configuration lookup working when the code itself lives in a worktree.
+run_deploy_hook() {
+  local DEPLOY_KIT_DIR="$DEPLOY_CONFIG_DIR"
+  "$@"
+}
 
 # ── Timer ─────────────────────────────────────────────────────
 DEPLOY_START=$SECONDS
@@ -170,7 +208,7 @@ if ! $DEPLOY_ONLY; then
   # ── Validate required files ──────────────────────────────────
   step "Validating deployment files"
 
-  DEPLOY_ENV="${DEPLOY_KIT_DIR}/.env.deploy"
+  DEPLOY_ENV="${DEPLOY_CONFIG_DIR}/.env.deploy"
   if [ "$SKIP_ENV_DEPLOY" != "true" ]; then
     if [ ! -f "$DEPLOY_ENV" ]; then
       fail ".env.deploy not found at ${DEPLOY_ENV} — create from .env.deploy.example in deploy-kit/"
@@ -179,9 +217,12 @@ if ! $DEPLOY_ONLY; then
   fi
 
   # Call optional extra validation hook
-  if type EXTRA_VALIDATE &>/dev/null; then
-    EXTRA_VALIDATE
+  if ! $DRY_RUN && type EXTRA_VALIDATE &>/dev/null; then
+    run_deploy_hook EXTRA_VALIDATE
   fi
+
+  [ -f "${SCRIPT_DIR}/docker-compose.yml" ] || fail 'docker-compose.yml not found'
+  [ -f "${SCRIPT_DIR}/Dockerfile" ] || fail 'Dockerfile not found'
 
   # ── Git info ──────────────────────────────────────────────────
   cd "$SCRIPT_DIR"
@@ -197,7 +238,7 @@ if ! $DEPLOY_ONLY; then
     if $DRY_RUN; then
       info "(skipped — dry run)"
     else
-      git pull --ff-only 2>&1 | sed 's/^/  /'
+      git pull --ff-only 2>&1 | sed 's/^/  /' || fail 'Git pull failed'
       GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
       ok "Now at ${GIT_SHA}"
     fi
@@ -236,7 +277,7 @@ if ! $DEPLOY_ONLY; then
         info "Upstream libraries updated in Phase 0 — syncing..."
       fi
 
-      if ! $needs_sync; then
+      if ! $needs_sync && [ "${DEPLOY_SKIP_DEPS:-false}" != true ]; then
         stale_workspace_libs=$(node "${DEPLOY_KIT_DIR}/scripts/check-stale-locks.js" 2>/dev/null || true)
         if [ -n "$stale_workspace_libs" ]; then
           needs_sync=true
@@ -255,32 +296,34 @@ if ! $DEPLOY_ONLY; then
         const git = Object.keys(all).filter(k => /^(git\+|github:)/.test(all[k]));
         if (git.length) console.log(git.join(' '));
       " 2>/dev/null || true)
-      if [ -n "$GIT_DEPS" ]; then
+      if [ -n "$GIT_DEPS" ] && [ "${DEPLOY_SKIP_DEPS:-false}" != true ]; then
         info "Updating git deps: ${GIT_DEPS}"
-        pnpm update $GIT_DEPS 2>&1 | tail -3 | sed 's/^/  /'
+        pnpm update $GIT_DEPS 2>&1 | sed 's/^/  /' || fail 'Git dependency update failed'
       fi
 
-      pnpm install --ignore-scripts 2>&1 | tail -3 | sed 's/^/  /'
+      pnpm install --ignore-scripts 2>&1 | sed 's/^/  /' || fail 'Dependency install failed'
 
       # Auto-approve any git-hosted deps whose commit SHAs changed.
       # pnpm 11 requires explicit allowBuilds entries with full URLs
       # for git deps — approve-builds --all handles this automatically.
-      pnpm approve-builds --all 2>/dev/null || true
+      pnpm approve-builds --all || fail 'Dependency build approval failed'
 
       # No URL rewriting needed — Docker build uses --ssh default
       # to forward the host SSH agent for private git deps.
 
       if ! git diff --quiet pnpm-lock.yaml pnpm-workspace.yaml 2>/dev/null; then
         step "Lockfile out of sync — auto-committing"
-        git add pnpm-lock.yaml pnpm-workspace.yaml
-        git commit -m "chore: sync pnpm-lock.yaml
+        lock_paths=(pnpm-lock.yaml)
+        [ ! -f pnpm-workspace.yaml ] || lock_paths+=(pnpm-workspace.yaml)
+        git add -- "${lock_paths[@]}"
+        git commit --only -m "chore: sync pnpm-lock.yaml
 
 Auto-committed by deploy-kit — lockfile or allowBuilds was out of
-sync with package.json, which causes pnpm install failures in Docker." 2>&1 | sed 's/^/  /'
+sync with package.json, which causes pnpm install failures in Docker." -- "${lock_paths[@]}" 2>&1 | sed 's/^/  /'
         git push 2>&1 | sed 's/^/  /' || warn "Auto-push failed — lockfile committed locally only"
         # Re-capture SHA after the auto-commit
         GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-        ok "Lockfile committed and pushed (now at ${GIT_SHA})"
+        ok "Lockfile committed (now at ${GIT_SHA})"
       else
         ok "Dependencies up to date"
       fi
@@ -295,8 +338,8 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
     warn "Skipped — deploying UNTESTED code (--skip-tests)"
   elif grep -q '"test":' package.json 2>/dev/null; then
     # Call optional pre-test hook (e.g. to run a host build if tests depend on dist/)
-    if type PRE_TEST &>/dev/null; then
-      PRE_TEST
+    if ! $DRY_RUN && type PRE_TEST &>/dev/null; then
+      run_deploy_hook PRE_TEST
     fi
 
     step "Running Tests"
@@ -316,8 +359,13 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
         [ "$_test_available_cores" -lt 2 ] && _test_available_cores=2
 
         # Count test files to decide if sharding is worthwhile
-        _test_file_count=$(find src tests -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.test.js' 2>/dev/null \
-          | grep -v node_modules | grep -v '/live/' | wc -l)
+        _test_dirs=()
+        for _test_dir in src tests; do [ ! -d "$_test_dir" ] || _test_dirs+=("$_test_dir"); done
+        _test_file_count=0
+        if [ "${#_test_dirs[@]}" -gt 0 ]; then
+          _test_file_count=$(find "${_test_dirs[@]}" -type f \( -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.test.js' \) \
+            -not -path '*/node_modules/*' -not -path '*/live/*' | wc -l)
+        fi
 
         # ── Sharding: split into N parallel Vitest instances ──
         # Sharding pays off when there are enough files to distribute
@@ -348,7 +396,6 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
             (
               export CI=true
               pnpm test \
-                --reporter=dot \
                 --shard="${_shard_index}/${_test_shard_count}" \
                 --maxWorkers="${_test_workers_per_shard}" \
                 > "$_shard_log" 2>&1
@@ -365,7 +412,7 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
               _failed_log="${_shard_log_dir}/${IMAGE_NAME:-tests}_shard${_failed_shard_index}.log"
               if [ -f "$_failed_log" ]; then
                 printf '%s\n' "  ── Shard ${_failed_shard_index} output ──"
-                sed 's/^/  /' "$_failed_log" | tail -40
+                tail -40 "$_failed_log" | sed 's/^/  /'
               fi
             fi
           done
@@ -376,7 +423,7 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
         else
           # ── Single-process execution (small suites / few cores) ──
           info "Running ${_test_file_count} test files with ${_test_workers_per_shard} workers (Cores: ${_test_total_cores}, Concurrency: ${_test_concurrent_builds})"
-          if ! (set -o pipefail; export CI=true; pnpm run test -- --maxWorkers="${_test_workers_per_shard}" 2>&1 | sed 's/^/  /'); then
+          if ! (set -o pipefail; export CI=true; pnpm run test --maxWorkers="${_test_workers_per_shard}" 2>&1 | sed 's/^/  /'); then
             fail "Tests failed! Aborting deployment."
           fi
         fi
@@ -397,7 +444,7 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
 
   # Sync canonical client boot script (repos with a boot.js get the
   # deploy-kit template copy so the 20+ clients can never drift)
-  if [ -f "${SCRIPT_DIR}/boot.js" ] && [ -f "${DEPLOY_KIT_DIR}/templates/client-boot.js" ]; then
+  if ! $DRY_RUN && [ -f "${SCRIPT_DIR}/boot.js" ] && [ -f "${DEPLOY_KIT_DIR}/templates/client-boot.js" ]; then
     if ! cmp -s "${DEPLOY_KIT_DIR}/templates/client-boot.js" "${SCRIPT_DIR}/boot.js"; then
       cp "${DEPLOY_KIT_DIR}/templates/client-boot.js" "${SCRIPT_DIR}/boot.js"
       info "boot.js synced from deploy-kit/templates/client-boot.js"
@@ -405,8 +452,8 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
   fi
 
   # Call optional pre-build hook (sets BUILD_ARGS, etc.)
-  if type PRE_BUILD &>/dev/null; then
-    PRE_BUILD
+  if ! $DRY_RUN && type PRE_BUILD &>/dev/null; then
+    run_deploy_hook PRE_BUILD
   fi
 
   # ── Cross-arch build (target device arch ≠ host arch) ────────
@@ -439,6 +486,15 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
     fi
   fi
 
+  if ! $DRY_RUN; then
+    GIT_SHA=$(git rev-parse HEAD)
+    TAG_SHA="${IMAGE_NAME}:${GIT_SHA}"
+    if [ -n "${DEPLOY_BUILD_SNAPSHOT:-}" ]; then
+      node "$DEPLOY_STATE_HELPER" snapshot --root "$ROOT_DIR" --kit "$DEPLOY_KIT_DIR" --config "$DEPLOY_CONFIG_DIR" \
+        --projects "$PROJECTS_JSON_PATH" --service "$DEPLOY_SERVICE_ID" --libs "${DEPLOY_LIBRARY_IDS// /,}" --output "$DEPLOY_BUILD_SNAPSHOT"
+    fi
+  fi
+
   step "Building Docker image"
   info "Tags: ${TAG_LATEST}, ${TAG_SHA}"
 
@@ -446,21 +502,28 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
     info "(skipped — dry run)"
   else
     BUILD_START_INNER=$SECONDS
-    temp_log=$(mktemp "/tmp/docker-build-${IMAGE_NAME}-XXXXXX.log")
-    
-    # Start a background progress ticker to reassure the user (loops only while parent process $$ is alive)
-    elapsed=0
+    temp_log="${DEPLOY_DOCKER_LOG:-${DEPLOY_LOG_DIR}/${IMAGE_NAME}.docker.log}"
+    mkdir -p "$(dirname "$temp_log")"
+    info "Full Docker build log: $temp_log"
     (
-      while kill -0 "$$" 2>/dev/null; do
-        sleep 10
-        elapsed=$((elapsed + 10))
+      sleeper=''
+      trap 'if [ -n "$sleeper" ]; then kill "$sleeper" 2>/dev/null || true; wait "$sleeper" 2>/dev/null || true; fi; exit 0' INT TERM
+      elapsed=0
+      while :; do
+        sleep 10 & sleeper=$!
+        wait "$sleeper"
+        sleeper=''; elapsed=$((elapsed + 10))
         echo "  Still building... (${elapsed}s elapsed)"
       done
     ) &
     ticker_pid=$!
 
     set +e
-    timeout --kill-after=30 "${BUILD_TIMEOUT}" \
+    build_timeout_flags=(--kill-after=30)
+    # The outer phase runner owns this session. Do not create a nested process
+    # group that could outlive cancellation of the outer worker.
+    if [ "${DEPLOY_ORCHESTRATED:-false}" = true ]; then build_timeout_flags+=(--foreground); fi
+    timeout "${build_timeout_flags[@]}" "${BUILD_TIMEOUT}" \
       docker buildx build \
       --load \
       $PLATFORM_FLAG \
@@ -478,9 +541,7 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
     BUILD_EXIT=$?
     set -e
 
-    # Stop the background progress ticker
-    kill "$ticker_pid" 2>/dev/null || true
-    wait "$ticker_pid" 2>/dev/null || true
+    stop_build_ticker
 
     # If the build failed, dump the tail of the temp log to stdout for quick terminal debugging
     if [ "$BUILD_EXIT" -ne 0 ]; then
@@ -488,12 +549,7 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
       tail -n "${BUILD_TAIL_LINES}" "$temp_log" | sed 's/^/  /'
     fi
 
-    # Append the full build log to the caller's log file (dynamic scoped $log_file from deploy-all.sh)
-    if [ -n "${log_file:-}" ]; then
-      cat "$temp_log" >> "$log_file"
-    fi
-    
-    rm -f "$temp_log"
+    # Keep the full log even on failure; the caller prints its path above.
 
     if [ "$BUILD_EXIT" -ne 0 ]; then
       if [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 137 ]; then
@@ -508,10 +564,10 @@ sync with package.json, which causes pnpm install failures in Docker." 2>&1 | se
 
   # ── If build-only, stop here ─────────────────────────────────
   if $BUILD_ONLY; then
-    # Clean up local SHA-tagged image (keep :latest for --changed-only)
-    if ! $DRY_RUN && [ "${GIT_SHA:-}" != "unknown" ] && [ -n "${GIT_SHA:-}" ]; then
-      docker rmi "$TAG_SHA" 2>/dev/null && info "Removed local tag ${TAG_SHA}" || true
-      docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
+    # Orchestrated runs clean images once after all workers finish.
+    if ! $DRY_RUN && [ "${DEPLOY_ORCHESTRATED:-false}" != true ]; then
+      docker rmi "$TAG_SHA" >/dev/null 2>&1 || true
+      docker image prune -f >/dev/null 2>&1 || true
     fi
     TOTAL=$((SECONDS - DEPLOY_START))
     echo ""
@@ -540,33 +596,30 @@ if $DEPLOY_ONLY; then
   GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
   BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   TAG_LATEST="${IMAGE_NAME}:latest"
-  DEPLOY_ENV="${DEPLOY_KIT_DIR}/.env.deploy"
+  DEPLOY_ENV="${DEPLOY_CONFIG_DIR}/.env.deploy"
 fi
+
+# SSH concatenates command arguments for a remote shell. Quote them before that
+# boundary so Docker templates containing spaces and pipes stay one argument.
+ssh_docker() {
+  local command
+  printf -v command '%q ' sudo "$DEPLOY_DOCKER_BIN" "$@"
+  ssh -o ConnectTimeout=8 -o BatchMode=yes "$DEPLOY_SSH_HOST" "$command"
+}
 
 # ── Shared: verify container is running after restart ─────────
 verify_container() {
-  local check_cmd="$1"  # command prefix to run docker ps
-  HEALTH_MAX=10
-  HEALTH_INTERVAL=2
-  HEALTH_OK=false
-  for _h in $(seq 1 $HEALTH_MAX); do
-    sleep $HEALTH_INTERVAL
-    CONTAINER_STATUS=$($check_cmd ps --filter "name=${IMAGE_NAME}$" --format '{{.Status}}' 2>/dev/null || echo "")
-    if [ -z "$CONTAINER_STATUS" ]; then
-      fail "Container '${IMAGE_NAME}' not found after restart — deploy failed"
-    fi
-    if echo "$CONTAINER_STATUS" | grep -qiE '^Up'; then
-      HEALTH_OK=true
-      break
-    fi
-    if [ "$_h" -lt "$HEALTH_MAX" ]; then
-      info "Container not ready yet (${CONTAINER_STATUS}) — retrying in ${HEALTH_INTERVAL}s... (${_h}/${HEALTH_MAX})"
-    fi
+  local attempts="${CONTAINER_HEALTH_ATTEMPTS:-10}" interval="${CONTAINER_HEALTH_INTERVAL:-2}" result attempt
+  positive_integer CONTAINER_HEALTH_ATTEMPTS "$attempts" 1000
+  positive_integer CONTAINER_HEALTH_INTERVAL "$interval" 300
+  for ((attempt=1; attempt<=attempts; attempt++)); do
+    result=$("$@" inspect --format '{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$IMAGE_NAME" 2>/dev/null || true)
+    case "$result" in
+      'true|'|'true|healthy') ok "Container running: $IMAGE_NAME"; return 0 ;;
+    esac
+    if [ "$attempt" -lt "$attempts" ]; then sleep "$interval"; fi
   done
-  if ! $HEALTH_OK; then
-    fail "Container '${IMAGE_NAME}' is not running after ${HEALTH_MAX} checks (status: ${CONTAINER_STATUS})"
-  fi
-  ok "Container running (${CONTAINER_STATUS})"
+  fail "Container $IMAGE_NAME did not become running/healthy (status: ${result:-missing})"
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -594,10 +647,11 @@ deploy_docker_api() {
 
     # Preserve previous image for rollback
     PREV_TAG="${IMAGE_NAME}:previous"
-    HAS_CURRENT=$(docker -H "$remote_host" images "$TAG_LATEST" --format '{{.ID}}' 2>/dev/null || true)
+    HAS_CURRENT="${DEPLOY_PREVIOUS_IMAGE:-}"
+    if [ -z "$HAS_CURRENT" ]; then HAS_CURRENT=$(docker -H "$remote_host" inspect --format '{{.Image}}' "$IMAGE_NAME" 2>/dev/null || true); fi
     if [ -n "$HAS_CURRENT" ]; then
-      info "Tagging current :latest as :previous for rollback..."
-      docker -H "$remote_host" tag "$TAG_LATEST" "$PREV_TAG" 2>/dev/null || true
+      info "Preserving the last known container image as :previous..."
+      docker -H "$remote_host" tag "$HAS_CURRENT" "$PREV_TAG" 2>/dev/null || true
       ok "Rollback image saved as ${PREV_TAG}"
     fi
 
@@ -629,47 +683,25 @@ deploy_docker_api() {
   if ! $TRANSFER_ONLY; then
     step "Restarting container via Docker API → ${remote_host}"
 
-    # Stage .env next to docker-compose.yml so env_file: .env resolves
-    local staged_env=false
-    if [ "$SKIP_ENV_DEPLOY" != "true" ] && [ -f "$DEPLOY_ENV" ]; then
-      # Back up existing .env if present (don't clobber local dev config)
-      [ -f "${SCRIPT_DIR}/.env" ] && cp "${SCRIPT_DIR}/.env" "${SCRIPT_DIR}/.env.pre-deploy"
-      cp "$DEPLOY_ENV" "${SCRIPT_DIR}/.env"
-      staged_env=true
-      ok ".env staged for compose"
-    fi
-
-    # Build compose file flags — stack device-specific override if present
-    local compose_files="-f ${SCRIPT_DIR}/docker-compose.yml"
-    local override_file="${SCRIPT_DIR}/docker-compose.${DEPLOY_TARGET}.yml"
-    if [ -f "$override_file" ]; then
-      compose_files="$compose_files -f $override_file"
-      info "Using device override: docker-compose.${DEPLOY_TARGET}.yml"
-    fi
-
-    # Restart container via local compose targeting remote daemon
-    info "Restarting container..."
-    set +e
-    COMPOSE_OUTPUT=$(DOCKER_HOST="$remote_host" docker compose \
-      $compose_files \
-      down --remove-orphans 2>&1)
-    COMPOSE_OUTPUT+=$'\n'
-    COMPOSE_OUTPUT+=$(DOCKER_HOST="$remote_host" docker compose \
-      $compose_files \
-      up -d 2>&1)
-    COMPOSE_EXIT=$?
-    set -e
-
-    echo "$COMPOSE_OUTPUT" | sed 's/^/ /'
-
-    # Restore original .env
-    if $staged_env; then
-      if [ -f "${SCRIPT_DIR}/.env.pre-deploy" ]; then
-        mv "${SCRIPT_DIR}/.env.pre-deploy" "${SCRIPT_DIR}/.env"
-      else
-        rm -f "${SCRIPT_DIR}/.env"
+    # Back up local configuration in a unique file and restore it on every
+    # exit path, including signals and a failed compose command.
+    if [ "$SKIP_ENV_DEPLOY" != true ] && [ -f "$DEPLOY_ENV" ]; then
+      if [ -e "${SCRIPT_DIR}/.env" ] || [ -L "${SCRIPT_DIR}/.env" ]; then
+        DEPLOY_ENV_BACKUP=$(mktemp "${SCRIPT_DIR}/.env.pre-deploy.XXXXXX")
+        cp -a --remove-destination "${SCRIPT_DIR}/.env" "$DEPLOY_ENV_BACKUP"
       fi
+      DEPLOY_ENV_STAGED=true
+      # Avoid following a development .env symlink into another configuration.
+      rm -f "${SCRIPT_DIR}/.env"
+      cp "$DEPLOY_ENV" "${SCRIPT_DIR}/.env"
     fi
+    local compose_files=(-f "${SCRIPT_DIR}/docker-compose.yml")
+    local override_file="${SCRIPT_DIR}/docker-compose.${DEPLOY_TARGET}.yml"
+    if [ -f "$override_file" ]; then compose_files+=(-f "$override_file"); fi
+    if COMPOSE_OUTPUT=$(DOCKER_HOST="$remote_host" docker compose "${compose_files[@]}" \
+      up -d --remove-orphans --no-build --pull never 2>&1); then COMPOSE_EXIT=0; else COMPOSE_EXIT=$?; fi
+    printf '%s\n' "$COMPOSE_OUTPUT" | sed 's/^/ /'
+    restore_deploy_env
 
     if echo "$COMPOSE_OUTPUT" | grep -qiE 'could not find an available.*address pool|port is already allocated|driver failed programming'; then
       fail "Container failed to start — Docker infrastructure error detected"
@@ -679,24 +711,12 @@ deploy_docker_api() {
     fi
 
     # Verify container running
-    verify_container "docker -H $remote_host"
+    verify_container docker -H "$remote_host"
 
-    # Prune old images on remote (keep :latest and :previous for rollback)
-    info "Pruning old images on ${DEPLOY_TARGET}..."
-    docker -H "$remote_host" images "${IMAGE_NAME}" --format '{{.Tag}} {{.ID}}' \
-      | grep -vE '^(latest|previous) ' \
-      | awk '{print $2}' \
-      | xargs -r docker -H "$remote_host" rmi 2>/dev/null || true
-    docker -H "$remote_host" image prune -f 2>/dev/null | sed 's/^/  /' || true
-
-    # ── Clean up local build images ───────────────────────────────
-    # Keep only :latest (needed for --changed-only SHA label detection).
-    # Remove the SHA-tagged image and prune dangling layers.
-    step "Cleaning up local build images"
-    if [ "${GIT_SHA:-}" != "unknown" ] && [ -n "${GIT_SHA:-}" ]; then
-      docker rmi "$TAG_SHA" 2>/dev/null && info "Removed local tag ${TAG_SHA}" || true
+    if [ "${DEPLOY_ORCHESTRATED:-false}" != true ]; then
+      docker -H "$remote_host" image prune -f >/dev/null 2>&1 || true
+      docker image prune -f >/dev/null 2>&1 || true
     fi
-    docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
   fi
 }
 
@@ -704,6 +724,7 @@ deploy_docker_api() {
 # METHOD: ssh  — pipe image + copy files + restart over SSH
 # ══════════════════════════════════════════════════════════════
 deploy_ssh() {
+  if $DRY_RUN; then info '(skipped — dry run)'; return 0; fi
   # Detect SSH access (retry with jittered backoff for parallel tiers)
   HAS_SSH=false
   for _ssh_attempt in 1 2; do
@@ -754,10 +775,11 @@ deploy_ssh() {
 
       # Preserve previous image for rollback
       PREV_TAG="${IMAGE_NAME}:previous"
-      HAS_CURRENT=$(ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} images '${TAG_LATEST}' --format '{{.ID}}'" 2>/dev/null || true)
+      HAS_CURRENT="${DEPLOY_PREVIOUS_IMAGE:-}"
+      if [ -z "$HAS_CURRENT" ]; then HAS_CURRENT=$(ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} inspect --format '{{.Image}}' '${IMAGE_NAME}'" 2>/dev/null || true); fi
       if [ -n "$HAS_CURRENT" ]; then
-        info "Tagging current :latest as :previous for rollback..."
-        ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} tag '${TAG_LATEST}' '${PREV_TAG}'" 2>/dev/null || true
+        info "Preserving the last known container image as :previous..."
+        ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} tag '${HAS_CURRENT}' '${PREV_TAG}'" 2>/dev/null || true
         ok "Rollback image saved as ${PREV_TAG}"
       fi
 
@@ -796,8 +818,9 @@ deploy_ssh() {
       fi
 
       info "Restarting container..."
-      COMPOSE_OUTPUT=$(ssh "$DEPLOY_SSH_HOST" "cd '${DEPLOY_COMPOSE_DIR}' && sudo ${DEPLOY_DOCKER_BIN} ${remote_compose_cmd} down --remove-orphans 2>&1 && sudo ${DEPLOY_DOCKER_BIN} ${remote_compose_cmd} up -d 2>&1" 2>&1)
-      COMPOSE_EXIT=$?
+      if COMPOSE_OUTPUT=$(ssh "$DEPLOY_SSH_HOST" "cd '${DEPLOY_COMPOSE_DIR}' && sudo ${DEPLOY_DOCKER_BIN} ${remote_compose_cmd} up -d --remove-orphans --no-build --pull never 2>&1" 2>&1); then
+        COMPOSE_EXIT=0
+      else COMPOSE_EXIT=$?; fi
       echo "$COMPOSE_OUTPUT" | sed 's/^/ /'
 
       if echo "$COMPOSE_OUTPUT" | grep -qiE 'could not find an available.*address pool|port is already allocated|driver failed programming'; then
@@ -807,26 +830,18 @@ deploy_ssh() {
         fail "Container restart failed (exit ${COMPOSE_EXIT})"
       fi
 
-      verify_container "ssh $DEPLOY_SSH_HOST sudo ${DEPLOY_DOCKER_BIN}"
+      verify_container ssh_docker
 
-      info "Pruning old images on ${DEPLOY_TARGET} (keeping :previous for rollback)..."
-      ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} images '${IMAGE_NAME}' --format '{{.Tag}} {{.ID}}' \
-        | grep -vE '^(latest|previous) ' \
-        | awk '{print \$2}' \
-        | xargs -r sudo ${DEPLOY_DOCKER_BIN} rmi 2>/dev/null || true"
-      ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} image prune -f" 2>/dev/null | sed 's/^/  /' || true
-
-      # ── Clean up local build images ───────────────────────────────
-      # Keep only :latest (needed for --changed-only SHA label detection).
-      # Remove the SHA-tagged image and prune dangling layers.
-      step "Cleaning up local build images"
-      if [ "${GIT_SHA:-}" != "unknown" ] && [ -n "${GIT_SHA:-}" ]; then
-        docker rmi "$TAG_SHA" 2>/dev/null && info "Removed local tag ${TAG_SHA}" || true
+      if [ "${DEPLOY_ORCHESTRATED:-false}" != true ]; then
+        ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} image prune -f" >/dev/null 2>&1 || true
+        docker image prune -f >/dev/null 2>&1 || true
       fi
-      docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
     fi
 
   else
+    if [ "${DEPLOY_ORCHESTRATED:-false}" = true ] || $RESTART_ONLY; then
+      fail "SSH unavailable: automatic deployment cannot complete on ${DEPLOY_TARGET}"
+    fi
     # ── SMB fallback ──────────────────────────────────────────
     warn "SSH to '${DEPLOY_SSH_HOST}' unavailable — falling back to SMB export"
     step "Exporting via SMB → ${DEPLOY_SMB_DIR}"
@@ -863,8 +878,16 @@ deploy_ssh() {
     warn "Manual steps required on ${DEPLOY_TARGET}:"
     info "  1. Load image: docker load < ${TARBALL}"
     info "  2. Restart:    docker compose up -d"
+    fail "Image exported; deployment still requires manual completion"
   fi
 }
+
+# Standalone attempts also invalidate the orchestrator's assumption that the
+# previous receipt still describes the target. Only a verified rollout clears it.
+if ! $DRY_RUN && [ "${DEPLOY_ORCHESTRATED:-false}" != true ]; then
+  mkdir -p "$DEPLOY_STATE_ROOT/pending/$DEPLOY_TARGET"
+  printf '{"standalone":true}\n' > "$DEPLOY_STATE_ROOT/pending/$DEPLOY_TARGET/$IMAGE_NAME.json"
+fi
 
 # ── 3. Dispatch to deploy method ──────────────────────────────
 if [ "$DEPLOY_METHOD" = "docker-api" ]; then

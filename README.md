@@ -139,6 +139,8 @@ Cleanup runs once locally and once per selected deployment host after workers fi
 | `REMOTE_TIMEOUT` | `30` | Remote preflight, cleanup, and migration command timeout |
 | `HEALTH_GATE_TIMEOUT` | `60` | HTTP health budget for an entire tier |
 | `HEALTH_GATE_INTERVAL` | `3` | Delay between health rounds |
+| `CONTAINER_HEALTH_ATTEMPTS` | `45` | Container inspect rounds after a restart; outlasts Docker's first health probe (one `interval` after start) |
+| `CONTAINER_HEALTH_INTERVAL` | `2` | Delay between container inspect rounds |
 | `MAX_CONCURRENT_SSH` | `8` | Concurrent repository pulls and transfer/restart workers |
 | `DEPLOY_COMPRESSION_THREADS` | `2` | Threads per pigz compressor |
 | `BUILD_CACHE_KEEP_STORAGE` | `20GB` | Cache storage to retain |

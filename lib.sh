@@ -608,14 +608,19 @@ ssh_docker() {
 }
 
 # ── Shared: verify container is running after restart ─────────
+# Docker runs a container's first health probe one `interval` after it starts
+# (30s in every compose file here), so a fresh container answers `starting` for
+# that long however fast it boots. The default budget outlasts that first probe
+# and one retry, in case the start period hides an early miss.
 verify_container() {
-  local attempts="${CONTAINER_HEALTH_ATTEMPTS:-10}" interval="${CONTAINER_HEALTH_INTERVAL:-2}" result attempt
+  local attempts="${CONTAINER_HEALTH_ATTEMPTS:-45}" interval="${CONTAINER_HEALTH_INTERVAL:-2}" result attempt waiting=false
   positive_integer CONTAINER_HEALTH_ATTEMPTS "$attempts" 1000
   positive_integer CONTAINER_HEALTH_INTERVAL "$interval" 300
   for ((attempt=1; attempt<=attempts; attempt++)); do
     result=$("$@" inspect --format '{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$IMAGE_NAME" 2>/dev/null || true)
     case "$result" in
       'true|'|'true|healthy') ok "Container running: $IMAGE_NAME"; return 0 ;;
+      'true|starting') $waiting || { info "Container up, health check starting — waiting up to $((attempts * interval))s"; waiting=true; } ;;
     esac
     if [ "$attempt" -lt "$attempts" ]; then sleep "$interval"; fi
   done

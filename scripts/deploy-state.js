@@ -15,7 +15,11 @@ function repository(dir, cache) {
   if (cache.has(dir)) return cache.get(dir);
   const sha = git(dir, 'rev-parse', 'HEAD').toString().trim();
   const diff = git(dir, 'diff', '--binary', '--no-ext-diff', 'HEAD', '--', '.');
-  const files = git(dir, 'ls-files', '--others', '--exclude-standard', '-z').toString().split('\0').filter(Boolean).sort();
+  // Git lists an untracked nested repository (a worktree under .claude/worktrees, a
+  // checkout dropped inside the tree) as `dir/`. It is not deployable source and
+  // reading it as a file throws EISDIR, so it neither fingerprints nor dirties.
+  const files = git(dir, 'ls-files', '--others', '--exclude-standard', '-z').toString().split('\0')
+    .filter(file => file && !file.endsWith('/')).sort();
   const digest = crypto.createHash('sha256').update(sha).update(diff);
   for (const file of files) {
     const full = path.join(dir, file);

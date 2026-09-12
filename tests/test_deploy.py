@@ -379,6 +379,15 @@ done
         self.assert_ok(self.run_deploy('--changed-only'))
         self.assertTrue(self.events('build-start', 'fixture-service'))
 
+    def test_untracked_nested_repository_is_not_source(self):
+        self.assert_ok(self.run_deploy())
+        self.clear_events()
+        nested = self.root / 'fixture-service/.claude/worktrees/task'
+        real_git(self.root / 'fixture-service', 'worktree', 'add', '--detach', str(nested))
+        (nested / 'scratch.txt').write_text('sibling session work')
+        self.assert_ok(self.run_deploy('--changed-only'))
+        self.assertFalse(self.events('build-start', 'fixture-service'))
+
     def test_edge_sync_failure_does_not_erase_deployment_results(self):
         self.assert_ok(self.run_deploy(env={'FAIL_EDGE': '1'}))
         self.assertTrue(self.manifest('deployed').exists())

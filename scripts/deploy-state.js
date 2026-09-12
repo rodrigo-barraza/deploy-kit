@@ -46,16 +46,36 @@ function snapshot(root, kit, configDir, registry, service, libs, cache = new Map
   return { version: 2, service, target, sha: repo.sha, source: repo.fingerprint,
     config: config.digest('hex'), libraries, registry: hash(JSON.stringify(registry)) };
 }
+// Every way a snapshot can fail to match a receipt, worded for the console; an
+// empty list is a match. A missing receipt is its own reason, not a mismatch: a
+// service with no record deploys once to write one, which reads very
+// differently from a service whose source moved.
+const short = sha => (sha || '').slice(0, 7);
+function differences(current, previous, impact = '', ignoreLibraries = false) {
+  if (!previous) return ['no deployment record'];
+  if (previous.version !== 2) return ['deployment record predates the current state format'];
+  const reasons = [];
+  if (current.service !== previous.service) reasons.push(`record belongs to ${previous.service}`);
+  if (current.target !== previous.target) reasons.push(`last deployed to ${previous.target}`);
+  if (current.source !== previous.source) {
+    reasons.push(current.sha === previous.sha ? 'working tree changed' : `source ${short(previous.sha)} → ${short(current.sha)}`);
+  }
+  if (current.config !== previous.config) reasons.push('configuration changed');
+  if (ignoreLibraries) return reasons;
+  const before = previous.libraries || {};
+  for (const id of new Set([...Object.keys(before), ...Object.keys(current.libraries)].sort())) {
+    const old = before[id], lib = current.libraries[id];
+    if (!old) reasons.push(`library ${id} not in the record`);
+    else if (!lib) reasons.push(`library ${id} no longer required`);
+    else if (old.fingerprint !== lib.fingerprint &&
+      !(impact === 'unaffected' && !old.dirty && !lib.dirty && old.sha !== lib.sha)) {
+      reasons.push(`library ${id} ${old.sha === lib.sha ? 'working tree changed' : `${short(old.sha)} → ${short(lib.sha)}`}`);
+    }
+  }
+  return reasons;
+}
 function matches(current, previous, impact = '', ignoreLibraries = false) {
-  if (!previous || previous.version !== 2 || current.service !== previous.service || current.target !== previous.target ||
-      current.source !== previous.source || current.config !== previous.config) return false;
-  if (ignoreLibraries) return true;
-  if (JSON.stringify(Object.keys(current.libraries).sort()) !== JSON.stringify(Object.keys(previous.libraries || {}).sort())) return false;
-  return Object.entries(current.libraries).every(([id, lib]) => {
-    const old = previous.libraries[id];
-    return old.fingerprint === lib.fingerprint ||
-      (impact === 'unaffected' && !old.dirty && !lib.dirty && old.sha !== lib.sha);
-  });
+  return differences(current, previous, impact, ignoreLibraries).length === 0;
 }
 function atomicWrite(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -82,9 +102,15 @@ function main(args) {
       atomicWrite(options.output || path.join(options.out, `${service}.json`), data);
     }
   } else if (command === 'matches') {
-    let previous;
-    try { previous = json(options.previous); } catch { process.exitCode = 1; return; }
-    process.exitCode = matches(json(options.current), previous, options.impact, options['ignore-libraries'] === 'true') ? 0 : 1;
+    // Exit 0 on a match. Otherwise exit 1 and print why on one line, so a caller
+    // can show the reason (`reason=$(… matches …)`) or drop it (`>/dev/null`).
+    let previous = null, reasons;
+    if (fs.existsSync(options.previous)) {
+      try { previous = json(options.previous); } catch { reasons = ['unreadable deployment record']; }
+    }
+    reasons ||= differences(json(options.current), previous, options.impact, options['ignore-libraries'] === 'true');
+    if (reasons.length) process.stdout.write(reasons.join('; ') + '\n');
+    process.exitCode = reasons.length ? 1 : 0;
   } else if (command === 'record') {
     const data = json(options.input);
     if (options.image) data.image = options.image;
@@ -105,4 +131,4 @@ if (require.main === module) {
   try { main(process.argv.slice(2)); }
   catch (err) { console.error(`Deployment state: ${err.message}`); process.exitCode = 2; }
 }
-module.exports = { snapshot, matches, atomicWrite };
+module.exports = { snapshot, matches, differences, atomicWrite };

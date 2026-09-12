@@ -567,6 +567,65 @@ docker -H mock-target compose up -d
         self.assert_ok(self.run_deploy('--only=fixture-service', '--build-only', skip_tests=False))
         self.assertFalse(self.events('build-start'))
 
+    def test_changed_only_explains_every_deployment(self):
+        self.assert_ok(self.run_deploy('--changed-only'))
+        self.assertIn('Deploying fixture-service — no deployment record', self.output)
+        self.assertIn('2 of 2 selected services have no deployment record', self.output)
+        self.assert_ok(self.run_deploy('--changed-only'))
+        self.assertIn('Skipping fixture-service', self.output)
+        self.assertNotIn('no deployment record', self.output)
+        before = real_git(self.root / 'fixture-service', 'rev-parse', '--short=7', 'HEAD')
+        (self.root / 'fixture-service/Dockerfile').write_text('FROM scratch\nLABEL v=2\n')
+        self.commit('fixture-service')
+        after = real_git(self.root / 'fixture-service', 'rev-parse', '--short=7', 'HEAD')
+        self.assert_ok(self.run_deploy('--changed-only'))
+        self.assertIn(f'Deploying fixture-service — source {before} → {after}', self.output)
+        self.assertIn('Skipping vault-service', self.output)
+        (self.root / 'fixture-service/untracked.txt').write_text('new source')
+        self.assert_ok(self.run_deploy('--changed-only'))
+        self.assertIn('Deploying fixture-service — working tree changed', self.output)
+        (self.kit / '.env.deploy').write_text('EXAMPLE=updated\n')
+        self.assert_ok(self.run_deploy('--changed-only'))
+        self.assertIn('Deploying fixture-service — configuration changed', self.output)
+        self.assertIn('Deploying vault-service — configuration changed', self.output)
+
+    def test_library_change_is_named_and_a_lost_record_is_not_a_change(self):
+        self.add_library(); self.consumer_library()
+        self.assert_ok(self.run_deploy())
+        (self.root / 'utilities-library/src/used.ts').write_text('export const used = 2;\n')
+        self.commit('utilities-library')
+        self.assert_ok(self.run_deploy('--changed-only'))
+        self.assertRegex(self.output, r'Deploying fixture-service — library utilities-library [0-9a-f]{7} → [0-9a-f]{7}')
+        self.manifest('deployed').unlink()
+        self.assert_ok(self.run_deploy('--changed-only'))
+        self.assertIn('Deploying fixture-service — no deployment record', self.output)
+        self.assertIn('1 of 1 selected services have no deployment record', self.output)
+        self.assertNotIn('Deploying vault-service', self.output)
+
+    def test_unfinished_rollout_is_named_when_the_inputs_still_match(self):
+        self.assert_ok(self.run_deploy())
+        self.assert_failed(self.run_deploy(env={'FAIL_HEALTH': 'fixture-service'}))
+        self.assertTrue(self.manifest('pending').exists())
+        self.assert_ok(self.run_deploy('--changed-only'))
+        self.assertIn('Deploying fixture-service — an earlier rollout did not finish', self.output)
+
+    def test_legacy_markers_are_announced_and_retired_by_the_first_record(self):
+        state = self.kit / '.deploy-state'; state.mkdir()
+        for service in ['vault-service', 'fixture-service']:
+            (state / f'{service}.sha').write_text(real_git(self.root / service, 'rev-parse', 'HEAD') + '\n')
+        (state / 'fixture-service.deps.sha').write_text('utilities-library: 0000000\n')
+        self.assert_failed(self.run_deploy('--changed-only', env={'FAIL_HEALTH': 'vault-service'}))
+        self.assertIn('3 legacy .sha marker files', self.output)
+        self.assertTrue((state / 'fixture-service.sha').exists())
+        self.assertFalse(self.manifest('deployed', 'vault-service').exists())
+        self.assert_ok(self.run_deploy('--changed-only'))
+        self.assertIn('Deploying fixture-service — no deployment record', self.output)
+        for marker in ['vault-service.sha', 'fixture-service.sha', 'fixture-service.deps.sha']:
+            self.assertFalse((state / marker).exists(), marker)
+        self.assert_ok(self.run_deploy('--changed-only'))
+        self.assertNotIn('legacy .sha', self.output)
+        self.assertIn('Skipping fixture-service', self.output)
+
     def test_cancellation_during_pull_stops_the_git_process(self):
         command = ['bash', str(self.kit / 'deploy-all.sh'), '--skip-tests', '--ignore-temp-skip']
         process = subprocess.Popen(command, cwd=self.kit, env=dict(self.env, PULL_DELAY='30'),

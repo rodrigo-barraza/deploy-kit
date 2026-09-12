@@ -113,9 +113,13 @@ if args[:2] == ['image', 'inspect']:
     print(image); sys.exit(0)
 if args and args[0] == 'inspect':
     if host == 'local': sys.exit(1)  # no previous git.sha label; exercise host sync
-    with state() as data: container = data['containers'].get(host, {}).get(args[-1])
-    if not container: sys.exit(1)
+    with state() as data:
+        container = data['containers'].get(host, {}).get(args[-1])
+        if not container: sys.exit(1)
+        starting = container.get('running') and container.get('starting', 0) > 0
+        if starting: container['starting'] -= 1
     if '{{.Image}}' in args: print('sha256:previous-container')
+    elif starting: print('true|starting')
     else: print('true|healthy' if container.get('running') else 'false|')
     sys.exit(0)
 if args and args[0] == 'save':
@@ -134,8 +138,12 @@ if args and args[0] == 'compose':
             os.kill(os.getsid(0), signal.SIGKILL)
             time.sleep(30)
         if os.environ.get('FAIL_RESTART') == service: sys.exit(10)
+        # STARTING_PROBES=<service>:<n> — Docker's first health probe runs one
+        # interval after start; the new container answers `starting` n times.
+        probes = os.environ.get('STARTING_PROBES', '').split(':')
+        starting = int(probes[1]) if probes[0] == service else 0
         with state() as data:
-            data['containers'].setdefault(host, {})[service] = {'running': True}
+            data['containers'].setdefault(host, {})[service] = {'running': True, 'starting': starting}
     sys.exit(0)
 if args and args[0] == 'ps':
     with state() as data: containers = dict(data['containers'].get(host, {}))

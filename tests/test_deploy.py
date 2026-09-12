@@ -166,6 +166,14 @@ source "${SCRIPT_DIR}/../deploy-kit/lib.sh"
         self.assertFalse(self.events('restart', 'fixture-service'))
         self.assertFalse(self.manifest('deployed', 'vault-service').exists())
 
+    def test_container_gate_outlasts_the_first_health_probe(self):
+        probing = {'STARTING_PROBES': 'vault-service:3', 'CONTAINER_HEALTH_ATTEMPTS': '5'}
+        self.assert_ok(self.run_deploy(env=probing))
+        self.assertTrue(self.manifest('deployed', 'vault-service').exists())
+        self.assertIn('health check starting', self.output)
+        self.assert_failed(self.run_deploy(env=dict(probing, CONTAINER_HEALTH_ATTEMPTS='2')))
+        self.assertIn('did not become running/healthy (status: true|starting)', self.output)
+
     def test_final_tier_is_checked_and_redirects_are_not_healthy(self):
         self.assert_failed(self.run_deploy(env={'FAIL_HEALTH': 'fixture-service', 'HEALTH_CODE': '302'}))
         self.assertTrue(self.events('health', 'fixture-service'))

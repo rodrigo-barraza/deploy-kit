@@ -330,7 +330,8 @@ if $CHANGED_ONLY && ! $SKIP_DEPS && ! $NO_IMPACT; then
 fi
 state_file() { printf '%s/%s/%s/%s.json' "$DEPLOY_STATE_ROOT" "$1" "${SVC_DEPLOY_TARGET[$2]}" "$2"; }
 set_status() { PHASE_STATUS[$1.$2]="$3"; printf '%s\n' "$3" > "$LOG_DIR/$1.$2.status"; }
-changed_count=0
+changed_count=0 unrecorded_count=0
+changed_verb=Deploying; $BUILD_ONLY && changed_verb=Building
 for svc in "${ALL_SERVICES[@]}"; do
   SVC_CHANGED[$svc]=0; NEEDS_BUILD[$svc]=1
   if ! should_deploy "$svc"; then
@@ -338,16 +339,24 @@ for svc in "${ALL_SERVICES[@]}"; do
   fi
   impact_verdict=''
   $IMPACT_SCRIPT_OK && impact_verdict="${IMPACT_VERDICT[$svc]:-}"
-  if $CHANGED_ONLY && node "$STATE_HELPER" matches --current "$LOG_DIR/inputs/$svc.json" \
-    --previous "$(state_file "$STATE_MODE" "$svc")" --impact "$impact_verdict" --ignore-libraries "$SKIP_DEPS"; then
-    # A build marker cannot make a deleted/replaced local image reusable.
-    if ! $BUILD_ONLY && [ ! -f "$(state_file pending "$svc")" ]; then
-      info "Skipping $svc (matches successful deployment)"
-      set_status "$svc" build SKIP; set_status "$svc" transfer SKIP; set_status "$svc" deploy SKIP; continue
+  if $CHANGED_ONLY; then
+    # The helper says WHY a service is going out. "no deployment record" is the
+    # one that matters: it means nothing has been recorded for this target yet
+    # (only a healthy rollout writes the record), not that anything changed.
+    if reason=$(node "$STATE_HELPER" matches --current "$LOG_DIR/inputs/$svc.json" \
+      --previous "$(state_file "$STATE_MODE" "$svc")" --impact "$impact_verdict" --ignore-libraries "$SKIP_DEPS"); then
+      # A build marker cannot make a deleted/replaced local image reusable.
+      if ! $BUILD_ONLY && [ ! -f "$(state_file pending "$svc")" ]; then
+        info "Skipping $svc (matches successful deployment)"
+        set_status "$svc" build SKIP; set_status "$svc" transfer SKIP; set_status "$svc" deploy SKIP; continue
+      fi
+      reason=''; $BUILD_ONLY || reason='an earlier rollout did not finish'
     fi
+    [ -z "$reason" ] || info "$changed_verb $svc — $reason"
+    [[ "$reason" != 'no deployment record'* ]] || unrecorded_count=$((unrecorded_count + 1))
   fi
   SVC_CHANGED[$svc]=1; changed_count=$((changed_count + 1))
-  if ! $NO_CACHE && [ "${SVC_SHARED[$svc]}" = 1 ] && node "$STATE_HELPER" matches \
+  if ! $NO_CACHE && [ "${SVC_SHARED[$svc]}" = 1 ] && node "$STATE_HELPER" matches >/dev/null \
     --current "$LOG_DIR/inputs/$svc.json" --previous "$(state_file built "$svc")" --impact "$impact_verdict" --ignore-libraries "$SKIP_DEPS"; then
     saved_image=$(node "$STATE_HELPER" image --input "$(state_file built "$svc")" --allow-untested "$SKIP_TESTS")
     current_image=$(timeout --kill-after=5 "$REMOTE_TIMEOUT" docker image inspect --format '{{.Id}}' "${svc}:latest" 2>/dev/null || true)
@@ -357,6 +366,11 @@ for svc in "${ALL_SERVICES[@]}"; do
     fi
   fi
 done
+if [ "$unrecorded_count" -gt 0 ]; then
+  info "$unrecorded_count of $changed_count selected services have no deployment record under $DEPLOY_STATE_ROOT/$STATE_MODE — each goes out once to write one; only a healthy rollout records state, so an aborted run leaves them unrecorded"
+  legacy_markers=("$DEPLOY_STATE_ROOT"/*.sha); [ -e "${legacy_markers[0]}" ] || legacy_markers=()
+  [ "${#legacy_markers[@]}" -eq 0 ] || info "${#legacy_markers[@]} legacy .sha marker files in $DEPLOY_STATE_ROOT are not consulted (they were written before deployment completed) and are removed as services record state"
+fi
 
 # Remote commands are bounded and quoted once at the SSH boundary.
 device_docker() {
@@ -415,8 +429,8 @@ launch_phase() {
   if $SKIP_PULL || [ "${SVC_SHARED[$svc]}" = 1 ]; then flags+=(--skip-pull); fi
   if [ "$phase" != build ] && ! $DRY_RUN; then
     snapshot_one "$svc" "$LOG_DIR/verified/$svc.json" || return 1
-    node "$STATE_HELPER" matches --current "$LOG_DIR/verified/$svc.json" --previous "$LOG_DIR/inputs/$svc.json" || {
-      warn "$svc changed after build/planning; refusing to deploy mixed inputs"; return 1;
+    drift=$(node "$STATE_HELPER" matches --current "$LOG_DIR/verified/$svc.json" --previous "$LOG_DIR/inputs/$svc.json") || {
+      warn "$svc changed after build/planning ($drift); refusing to deploy mixed inputs"; return 1;
     }
     # Keep the last healthy receipt for rollback, but force a retry until every
     # mutating phase and health check has completed, even if source is reverted.
@@ -447,9 +461,9 @@ finish_job() {
   if [ "$code" -ne 0 ]; then terminate_deploy_sessions "$pid"; fi
   unset 'JOB_SERVICE[$pid]' 'JOB_PHASE[$pid]'
   if [ "$code" -eq 0 ] && [ "$phase" = build ] && ! $DRY_RUN && [ "${SVC_SHARED[$svc]}" = 1 ]; then
-    if ! snapshot_one "$svc" "$LOG_DIR/verified/$svc.json" || ! node "$STATE_HELPER" matches \
-      --current "$LOG_DIR/verified/$svc.json" --previous "$LOG_DIR/inputs/$svc.json"; then
-      warn "$svc inputs changed during its build; image will not be reused"; code=1
+    if ! snapshot_one "$svc" "$LOG_DIR/verified/$svc.json" || ! drift=$(node "$STATE_HELPER" matches \
+      --current "$LOG_DIR/verified/$svc.json" --previous "$LOG_DIR/inputs/$svc.json"); then
+      warn "$svc inputs changed during its build (${drift:-snapshot failed}); image will not be reused"; code=1
     else
       image=$(timeout --kill-after=5 "$REMOTE_TIMEOUT" docker image inspect --format '{{.Id}}' "${svc}:latest" 2>/dev/null || true)
       if [ -z "$image" ]; then code=1; warn "$svc produced no local image"
@@ -593,15 +607,17 @@ finalize_service() {
     rm -f "$DEPLOY_STATE_ROOT/deployed/$device/$svc.json" "$DEPLOY_STATE_ROOT/pending/$device/$svc.json"
   done
   snapshot_one "$svc" "$LOG_DIR/verified/$svc.json" || { set_status "$svc" deploy FAIL; return 1; }
-  node "$STATE_HELPER" matches --current "$LOG_DIR/verified/$svc.json" --previous "$LOG_DIR/inputs/$svc.json" || {
-    set_status "$svc" deploy FAIL; warn "$svc inputs changed during deployment; state was not advanced"; return 1;
+  drift=$(node "$STATE_HELPER" matches --current "$LOG_DIR/verified/$svc.json" --previous "$LOG_DIR/inputs/$svc.json") || {
+    set_status "$svc" deploy FAIL; warn "$svc inputs changed during deployment ($drift); state was not advanced"; return 1;
   }
   input="$LOG_DIR/inputs/$svc.json"
   [ "${SVC_SHARED[$svc]}" = 0 ] || input="$(state_file built "$svc")"
   if ! node "$STATE_HELPER" record --input "$input" --output "$(state_file deployed "$svc")" --unknown-libraries "$SKIP_DEPS"; then
     set_status "$svc" deploy FAIL; return 1
   fi
-  rm -f "$(state_file pending "$svc")"
+  # The record supersedes the pre-2026-09-10 markers, which were written before
+  # a deployment completed and are never consulted; retire them with it.
+  rm -f "$(state_file pending "$svc")" "$DEPLOY_STATE_ROOT/$svc.sha" "$DEPLOY_STATE_ROOT/$svc.deps.sha"
 }
 
 aborted=false

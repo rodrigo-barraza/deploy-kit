@@ -17,7 +17,7 @@ DISPLAY_NAME="🔷 Prism"
 source "${SCRIPT_DIR}/../deploy-kit/lib.sh"
 ```
 
-The library handles validation, dependency installation, tests, image builds, transfers, and container updates. The orchestrator owns scheduling, health gates, deployment state, and cleanup. A failed prerequisite or health check produces a nonzero exit; later tiers do not restart after a failed tier.
+The library handles validation, dependency installation, tests, image builds, transfers, and container updates. A docker CLI that dies before the daemon has started building (`cannot allocate memory` reading `~/.docker` under a parallel build load, a daemon socket that briefly refuses) is retried twice (`BUILD_CLI_RETRIES`, `BUILD_RETRY_DELAY`, `BUILD_TRANSIENT_PATTERN`); a build the daemon ran, or one that timed out, is final. The orchestrator owns scheduling, health gates, deployment state, and cleanup. A failed prerequisite or health check produces a nonzero exit; later tiers do not restart after a failed tier.
 
 The orchestrator requires Bash 5.1+, Node.js, Git, Docker, curl, and the Linux/WSL tools `flock`, `setsid`, and `timeout`. SSH targets also require an SSH agent and access to their configured host. The test suite uses Python 3's standard library.
 
@@ -112,7 +112,7 @@ Every service a changed-only run selects is announced with its reason: `Deployin
 
 The older `.sha` and `.deps.sha` files are not trusted as rollout receipts because they were written before deployment completed. **The first changed-only deployment after this update redeploys selected services once** to establish verified state. No manual deletion is required: each service's markers are removed when its first record is written, and a run that still finds them says so.
 
-Unless `--skip-pull` is set, the registry and selected repositories are pulled before change detection. Repository pulls have bounded concurrency; newly discovered transitive libraries are also synchronized before planning. In changed-only mode, a registry change includes Vault before dependent deployments, even with a group or `--only` filter; explicitly skipping Vault in that situation fails. An unchanged foundation must still pass its health gate. All deployed tiers, including the last tier, are checked. HTTP checks require 2xx; redirects do not count as healthy.
+Unless `--skip-pull` is set, the registry and selected repositories are pulled before change detection. Repository pulls have bounded concurrency; newly discovered transitive libraries are also synchronized before planning. In changed-only mode, a registry change includes Vault before dependent deployments, even with a group or `--only` filter; explicitly skipping Vault in that situation fails. An unchanged foundation must still pass its health gate. All deployed tiers, including the last tier, are checked. HTTP checks follow the app's own redirects (up to five, so a front door that sends `/` to `/chat` is graded on `/chat`) and require a 2xx at the end of the chain; a redirect that never lands on one is not healthy.
 
 `--skip-deps` skips shared-library synchronization and dependency change checks. A build performed this way does not certify library revisions; a later normal deployment may rebuild to verify them. `--only` bypasses the temporary skip list, while an explicit `--skip` still excludes the service. Unknown flags, groups, service IDs, and invalid concurrency values fail before deployment actions.
 

@@ -576,7 +576,11 @@ wait_tier_healthy() {
     remaining=$((deadline - SECONDS)); [ "$remaining" -le 3 ] || remaining=3
     for svc in "${!pending[@]}"; do
       (
-        code=$(curl -sS --max-time "$remaining" -o /dev/null -w '%{http_code}' "${SVC_HEALTH_URL[$svc]}" 2>/dev/null) || exit 1
+        # A front door that redirects (prism-client's / → /chat, messages-client's
+        # / → /sms) is the app answering; follow it and grade the page it lands on.
+        # Only a 2xx at the end of the chain is healthy — a redirect that never
+        # lands is not.
+        code=$(curl -sS -L --max-redirs 5 --max-time "$remaining" -o /dev/null -w '%{http_code}' "${SVC_HEALTH_URL[$svc]}" 2>/dev/null) || exit 1
         [[ "$code" == 2[0-9][0-9] ]] && : > "$check_dir/$svc"
       ) & pids+=("$!")
     done

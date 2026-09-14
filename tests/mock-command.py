@@ -55,8 +55,11 @@ if cmd in ('ssh-add', 'ssh-agent', 'powershell.exe'):
     sys.exit(0)
 if cmd == 'curl':
     service = args[-1].rsplit('/', 1)[-1]
-    event('health', service=service)
-    print(os.environ.get('HEALTH_CODE', '503') if os.environ.get('FAIL_HEALTH') == service else '200', end='')
+    event('health', service=service, follows='-L' in args)
+    if os.environ.get('FAIL_HEALTH') == service: print(os.environ.get('HEALTH_CODE', '503'), end='')
+    # HEALTH_REDIRECT: the front door answers 307 to its page; only a follower sees the 200.
+    elif os.environ.get('HEALTH_REDIRECT') == service and '-L' not in args: print('307', end='')
+    else: print('200', end='')
     sys.exit(0)
 if cmd == 'ssh':
     event('ssh', args=args)
@@ -89,6 +92,17 @@ service = os.environ.get('DEPLOY_SERVICE_ID', Path.cwd().name)
 event('docker', args=args, host=host, service=service)
 if args[:2] == ['buildx', 'build']:
     if '-t' in args: service = args[args.index('-t') + 1].split(':')[0]
+    # FAIL_BUILD_CLI=<service>:<n> — the docker CLI dies n times before the daemon builds anything.
+    cli_service, _, cli_count = os.environ.get('FAIL_BUILD_CLI', '').partition(':')
+    if cli_service == service:
+        with state() as data:  # exit outside the block, or the counter is never written back
+            failures = data.setdefault('cli_failures', {}).get(service, 0)
+            cli_dies = failures < int(cli_count or 1)
+            if cli_dies: data['cli_failures'][service] = failures + 1
+        if cli_dies:
+            event('build-cli-failure', service=service)
+            print('ERROR: readdirent /home/mock/.docker/contexts/meta: cannot allocate memory')
+            sys.exit(1)
     with state() as data:
         data['active'] += 1; data['maximum'] = max(data['maximum'], data['active'])
     event('build-start', service=service)

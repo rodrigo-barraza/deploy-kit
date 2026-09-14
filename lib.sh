@@ -149,8 +149,36 @@ restore_deploy_env() {
     DEPLOY_ENV_STAGED=false
   fi
 }
+start_build_ticker() {
+  (
+    sleeper=''
+    trap 'if [ -n "$sleeper" ]; then kill "$sleeper" 2>/dev/null || true; wait "$sleeper" 2>/dev/null || true; fi; exit 0' INT TERM
+    elapsed=0
+    while :; do
+      sleep 10 & sleeper=$!
+      wait "$sleeper"
+      sleeper=''; elapsed=$((elapsed + 10))
+      echo "  Still building... (${elapsed}s elapsed)"
+    done
+  ) &
+  ticker_pid=$!
+}
 stop_build_ticker() {
   if [ -n "$ticker_pid" ]; then kill "$ticker_pid" 2>/dev/null || true; wait "$ticker_pid" 2>/dev/null || true; ticker_pid=''; fi
+}
+# A docker CLI that dies before the daemon has started building is not the
+# image's failure: `readdirent ~/.docker/contexts/meta: cannot allocate memory`
+# took accounts-client down in 0 s on 2026-09-13 while forty builds shared the
+# box, and a daemon socket can refuse for a moment under the same load. Those
+# are retried; a build the daemon actually ran, or one that timed out, is final.
+BUILD_TRANSIENT_PATTERN="${BUILD_TRANSIENT_PATTERN:-cannot allocate memory|resource temporarily unavailable|error during connect|Cannot connect to the Docker daemon|connection reset by peer}"
+BUILD_CLI_RETRIES="${BUILD_CLI_RETRIES:-2}"
+BUILD_RETRY_DELAY="${BUILD_RETRY_DELAY:-5}"
+build_died_before_building() {
+  local log="$1" exit_code="$2"
+  [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ] && [ "$exit_code" -ne 137 ] || return 1
+  ! grep -qE '^#[0-9]+ ' "$log" || return 1          # buildkit ran a step: the build itself failed
+  grep -qiE "$BUILD_TRANSIENT_PATTERN" "$log"
 }
 cleanup_service() {
   local status=$?
@@ -505,43 +533,40 @@ sync with package.json, which causes pnpm install failures in Docker." -- "${loc
     temp_log="${DEPLOY_DOCKER_LOG:-${DEPLOY_LOG_DIR}/${IMAGE_NAME}.docker.log}"
     mkdir -p "$(dirname "$temp_log")"
     info "Full Docker build log: $temp_log"
-    (
-      sleeper=''
-      trap 'if [ -n "$sleeper" ]; then kill "$sleeper" 2>/dev/null || true; wait "$sleeper" 2>/dev/null || true; fi; exit 0' INT TERM
-      elapsed=0
-      while :; do
-        sleep 10 & sleeper=$!
-        wait "$sleeper"
-        sleeper=''; elapsed=$((elapsed + 10))
-        echo "  Still building... (${elapsed}s elapsed)"
-      done
-    ) &
-    ticker_pid=$!
-
-    set +e
     build_timeout_flags=(--kill-after=30)
     # The outer phase runner owns this session. Do not create a nested process
     # group that could outlive cancellation of the outer worker.
     if [ "${DEPLOY_ORCHESTRATED:-false}" = true ]; then build_timeout_flags+=(--foreground); fi
-    timeout "${build_timeout_flags[@]}" "${BUILD_TIMEOUT}" \
-      docker buildx build \
-      --load \
-      $PLATFORM_FLAG \
-      --ssh default \
-      $NO_CACHE \
-      $BUILD_EXTRA_FLAGS \
-      $BUILD_ARGS \
-      $BUILD_SECRETS \
-      --label "git.sha=${GIT_SHA}" \
-      --label "git.branch=${GIT_BRANCH}" \
-      --label "build.time=${BUILD_TIME}" \
-      -t "$TAG_LATEST" \
-      -t "$TAG_SHA" \
-      . > "$temp_log" 2>&1
-    BUILD_EXIT=$?
-    set -e
-
-    stop_build_ticker
+    build_attempt=0
+    while :; do
+      build_attempt=$((build_attempt + 1))
+      start_build_ticker
+      set +e
+      timeout "${build_timeout_flags[@]}" "${BUILD_TIMEOUT}" \
+        docker buildx build \
+        --load \
+        $PLATFORM_FLAG \
+        --ssh default \
+        $NO_CACHE \
+        $BUILD_EXTRA_FLAGS \
+        $BUILD_ARGS \
+        $BUILD_SECRETS \
+        --label "git.sha=${GIT_SHA}" \
+        --label "git.branch=${GIT_BRANCH}" \
+        --label "build.time=${BUILD_TIME}" \
+        -t "$TAG_LATEST" \
+        -t "$TAG_SHA" \
+        . > "$temp_log" 2>&1
+      BUILD_EXIT=$?
+      set -e
+      stop_build_ticker
+      [ "$BUILD_EXIT" -ne 0 ] || break
+      [ "$build_attempt" -le "$BUILD_CLI_RETRIES" ] || break
+      build_died_before_building "$temp_log" "$BUILD_EXIT" || break
+      warn "Docker died before building (attempt ${build_attempt}, exit ${BUILD_EXIT}): $(tail -n 1 "$temp_log") — retrying in ${BUILD_RETRY_DELAY}s"
+      cp "$temp_log" "${temp_log}.attempt${build_attempt}"
+      sleep "$BUILD_RETRY_DELAY"
+    done
 
     # If the build failed, dump the tail of the temp log to stdout for quick terminal debugging
     if [ "$BUILD_EXIT" -ne 0 ]; then

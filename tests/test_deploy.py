@@ -174,11 +174,33 @@ source "${SCRIPT_DIR}/../deploy-kit/lib.sh"
         self.assert_failed(self.run_deploy(env=dict(probing, CONTAINER_HEALTH_ATTEMPTS='2')))
         self.assertIn('did not become running/healthy (status: true|starting)', self.output)
 
-    def test_final_tier_is_checked_and_redirects_are_not_healthy(self):
+    def test_final_tier_is_checked_and_a_redirect_that_never_lands_is_not_healthy(self):
         self.assert_failed(self.run_deploy(env={'FAIL_HEALTH': 'fixture-service', 'HEALTH_CODE': '302'}))
         self.assertTrue(self.events('health', 'fixture-service'))
         self.assertFalse(self.manifest('deployed').exists())
         self.assertFalse(self.events('dns'))
+
+    def test_a_front_door_that_redirects_to_its_page_is_healthy(self):
+        self.assert_ok(self.run_deploy(env={'HEALTH_REDIRECT': 'fixture-service'}))
+        self.assertTrue(all(row['follows'] for row in self.events('health', 'fixture-service')))
+        self.assertTrue(self.manifest('deployed').exists())
+
+    def test_docker_dying_before_the_build_is_retried_but_not_forever(self):
+        self.assert_ok(self.run_deploy('--only=fixture-service', '--build-only',
+                                       env={'FAIL_BUILD_CLI': 'fixture-service:1', 'BUILD_RETRY_DELAY': '0'}))
+        self.assertEqual(len(self.events('build-cli-failure', 'fixture-service')), 1)
+        self.assertEqual(len(self.events('build-end', 'fixture-service')), 1)
+        self.assertIn('Docker died before building (attempt 1', self.output)
+        self.assertTrue(self.manifest('built').exists())
+        logs = list((self.kit / '.deploy-logs').glob('*/fixture-service.docker.log.attempt1'))
+        self.assertIn('cannot allocate memory', logs[0].read_text())
+        self.clear_events()
+        docker_state = self.root / 'docker-state.json'
+        docker_state.write_text(json.dumps({**json.loads(docker_state.read_text()), 'cli_failures': {}}))
+        self.assert_failed(self.run_deploy('--only=fixture-service', '--build-only', '--no-cache',
+                                           env={'FAIL_BUILD_CLI': 'fixture-service:3', 'BUILD_RETRY_DELAY': '0'}))
+        self.assertEqual(len(self.events('build-cli-failure', 'fixture-service')), 3)
+        self.assertFalse(self.events('build-start', 'fixture-service'))
 
     def test_failed_build_does_not_stop_or_remove_old_container(self):
         self.seed_source()
@@ -302,6 +324,7 @@ source "${SCRIPT_DIR}/../deploy-kit/lib.sh"
         start = time.monotonic()
         self.assert_failed(self.run_deploy('--only=fixture-service', '--build-only', env={'FAIL_BUILD': 'fixture-service'}))
         self.assertLess(time.monotonic() - start, 5)
+        self.assertEqual(len(self.events('build-start', 'fixture-service')), 1)  # a real failure is not retried
         logs = list((self.kit / '.deploy-logs').glob('*/fixture-service.docker.log'))
         self.assertEqual(len(logs), 1)
         self.assertIn('MOCK_BUILD_LINE_1\n', logs[0].read_text())

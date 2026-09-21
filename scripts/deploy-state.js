@@ -11,14 +11,19 @@ const json = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 function git(dir, ...args) {
   return execFileSync('git', ['-C', dir, ...args], { maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 }
-function repository(dir, cache) {
+// A project in a subdirectory of a larger repository (registry `dir`) is its own
+// directory plus its `sources`; the rest of that repository moving is not a change
+// to it, so its sha is the last commit that touched those paths, not HEAD.
+function repository(dir, cache, sources = []) {
   if (cache.has(dir)) return cache.get(dir);
-  const sha = git(dir, 'rev-parse', 'HEAD').toString().trim();
-  const diff = git(dir, 'diff', '--binary', '--no-ext-diff', 'HEAD', '--', '.');
+  const nested = git(dir, 'rev-parse', '--show-prefix').toString().trim() !== '';
+  const paths = ['.', ...(nested ? sources.map(source => `:(top)${source}`) : [])];
+  const sha = (nested ? git(dir, 'log', '-1', '--format=%H', '--', ...paths) : git(dir, 'rev-parse', 'HEAD')).toString().trim();
+  const diff = git(dir, 'diff', '--binary', '--no-ext-diff', 'HEAD', '--', ...paths);
   // Git lists an untracked nested repository (a worktree under .claude/worktrees, a
   // checkout dropped inside the tree) as `dir/`. It is not deployable source and
   // reading it as a file throws EISDIR, so it neither fingerprints nor dirties.
-  const files = git(dir, 'ls-files', '--others', '--exclude-standard', '-z').toString().split('\0')
+  const files = git(dir, 'ls-files', '--others', '--exclude-standard', '-z', '--', ...paths).toString().split('\0')
     .filter(file => file && !file.endsWith('/')).sort();
   const digest = crypto.createHash('sha256').update(sha).update(diff);
   for (const file of files) {
@@ -35,8 +40,8 @@ function snapshot(root, kit, configDir, registry, service, libs, cache = new Map
   if (!project) throw new Error(`Unknown project: ${service}`);
   const target = project.deployTarget || 'synology';
   const device = (registry.devices || []).find(d => d.id === target);
-  const dir = path.join(root, service);
-  const repo = repository(dir, cache);
+  const dir = path.join(root, project.dir || service);
+  const repo = repository(dir, cache, project.sources || []);
   const libraries = {};
   for (const lib of libs) libraries[lib] = repository(path.join(root, lib), cache);
   const config = crypto.createHash('sha256').update(JSON.stringify({ project, device }));

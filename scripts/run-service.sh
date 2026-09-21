@@ -11,7 +11,10 @@ bash -euo pipefail -c '
   source() {
     case "$1" in
       */deploy-kit/lib.sh) shift; builtin source "$DEPLOY_KIT_DIR/lib.sh" "${_DEPLOY_WRAPPER_ARGS[@]}" ;;
-      *) builtin source "$@" ;;
+      # A bare `source file` inherits the arguments of its caller; inside this
+      # function those would be the path being sourced. (No apostrophes here: this
+      # text sits inside a single-quoted string.)
+      *) if [ "$#" -eq 1 ]; then builtin source "$1" "${_DEPLOY_WRAPPER_ARGS[@]}"; else builtin source "$@"; fi ;;
     esac
   }
   builtin source "$0" "$@"

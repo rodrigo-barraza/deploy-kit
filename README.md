@@ -219,6 +219,17 @@ recorded here so a fresh NAS or a replaced router does not silently lose it.
 
 Services can deploy to different devices. Configuration lives in `vault-service/projects.json` (single source of truth).
 
+### A project inside another repository
+
+A project is normally the workspace directory named after its registry `id`. One that lives inside a larger repository names its directory with `dir` (relative to the workspace root) and, with `sources`, the paths outside that directory its image is built from (relative to that repository's root):
+
+```json
+{ "id": "paper-tiles-service", "dir": "paper-tiles-client/rust/crates/pt-service",
+  "sources": ["rust/Cargo.lock", "rust/Cargo.toml", "rust/crates/pt-server"] }
+```
+
+Its `deploy.sh` is read from `dir`. It is never pulled (the host repository moves by its own rules), and change detection fingerprints only `dir` and `sources`: the recorded sha is the last commit that touched them, so the rest of that repository moving does not redeploy it.
+
 ### How It Works
 
 Each project can specify a `deployTarget` device ID (defaults to `"synology"`):

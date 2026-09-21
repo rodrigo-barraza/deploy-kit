@@ -103,13 +103,13 @@ STATE_HELPER="${SCRIPT_DIR}/scripts/deploy-state.js"
 STATE_MODE=deployed
 $BUILD_ONLY && STATE_MODE=built
 DEPLOY_STATE_DIR="${DEPLOY_STATE_ROOT}/${STATE_MODE}"
-declare -A TIER_SERVICES=() SVC_HEALTH_URL=() SVC_DEPLOY_TARGET=() SVC_LIB_DEPS=() SVC_DEPS=()
+declare -A TIER_SERVICES=() SVC_HEALTH_URL=() SVC_DEPLOY_TARGET=() SVC_LIB_DEPS=() SVC_DEPS=() SVC_DIR=()
 declare -A DEVICE_METHOD=() DEVICE_HOSTNAME=() DEVICE_ARCH=() DEVICE_SSH_ALIAS=() DEVICE_DOCKER_BIN=()
 declare -A DEVICE_DOCKER_API=() DEVICE_COMPOSE_ROOT=() DEVICE_SMB_ROOT=()
 ALL_SERVICES=() LIBRARY_IDS=() DOCKER_DEVICES=()
 load_projects() {
   local data tier id
-  TIER_SERVICES=(); SVC_HEALTH_URL=(); SVC_DEPLOY_TARGET=(); SVC_LIB_DEPS=(); SVC_DEPS=()
+  TIER_SERVICES=(); SVC_HEALTH_URL=(); SVC_DEPLOY_TARGET=(); SVC_LIB_DEPS=(); SVC_DEPS=(); SVC_DIR=()
   DEVICE_METHOD=(); DEVICE_HOSTNAME=(); DEVICE_ARCH=(); DEVICE_SSH_ALIAS=(); DEVICE_DOCKER_BIN=()
   DEVICE_DOCKER_API=(); DEVICE_COMPOSE_ROOT=(); DEVICE_SMB_ROOT=(); ALL_SERVICES=()
   data=$(node "${SCRIPT_DIR}/scripts/parse-projects.js" "$PROJECTS_JSON" "$ROOT_DIR") || die 'Invalid project registry'
@@ -118,6 +118,8 @@ load_projects() {
     for id in ${TIER_SERVICES[$tier]:-}; do ALL_SERVICES+=("$id"); done
   done
 }
+# Where a project's deploy.sh lives: its registry `dir`, else a directory named after it.
+svc_dir() { printf '%s/%s' "$ROOT_DIR" "${SVC_DIR[$1]:-$1}"; }
 TEMPORARY_SKIP="qbittorrent-service,accounts-service,accounts-client,animals-service,animals-client,clankerbox-service,clankerbox-client,clock-crew-service,clock-crew-client,classic-whitemane-client,dygest-service,dygest-client,games-service,gauge-service,gauge-client,images-service,images-client,iron-service,iron-client,ledger-service,ledger-client,lights-client,lupos-client,meepothegeomancer-client,messages-service,messages-client,music-service,music-client,notes-service,notes-client,reels-service,reels-client,payments-service,payments-client"
 declare -A PHASE_STATUS=()
 declare -A SVC_SELECTED=() SVC_COLORS=() SVC_SHARED=() SVC_CHANGED=() NEEDS_BUILD=()
@@ -252,6 +254,9 @@ pull_repos() {
   local id pid
   for id in "$@"; do
     [ "${PULLED[$id]:-0}" = 0 ] || continue
+    # A project with a registry `dir` is part of another repository, which moves
+    # by that repository's rules; deploy what is checked out there.
+    if [ -n "${SVC_DIR[$id]:-}" ]; then PULLED[$id]=1; continue; fi
     [ -d "$ROOT_DIR/$id" ] || die "Missing repository: $id"
     while [ "${#JOB_SERVICE[@]}" -ge "$MAX_CONCURRENT_SSH" ]; do finish_pull; done
     PULL_BEFORE[$id]=$(git -C "$ROOT_DIR/$id" rev-parse HEAD)
@@ -291,9 +296,9 @@ fi
 for svc in "${ALL_SERVICES[@]}"; do
   SVC_COLORS[$svc]=$(svc_color "$svc")
   SVC_SHARED[$svc]=0
-  if grep -qE 'source .*deploy-kit/lib.sh' "${ROOT_DIR}/${svc}/deploy.sh" 2>/dev/null; then SVC_SHARED[$svc]=1; fi
+  if grep -qE 'source .*deploy[-_]kit[^ ]*/lib\.sh' "$(svc_dir "$svc")/deploy.sh" 2>/dev/null; then SVC_SHARED[$svc]=1; fi
   if should_deploy "$svc"; then
-    [ -f "${ROOT_DIR}/${svc}/deploy.sh" ] || die "Missing deploy.sh for $svc"
+    [ -f "$(svc_dir "$svc")/deploy.sh" ] || die "Missing deploy.sh for $svc"
   fi
 done
 snapshot_one() {
@@ -450,7 +455,7 @@ launch_phase() {
   DEPLOY_BUILD_SNAPSHOT="$LOG_DIR/inputs/$svc.json" DEPLOY_LIBRARY_IDS="${SVC_LIB_DEPS[$svc]:-}" \
   DEPLOY_STATE_HELPER="$STATE_HELPER" \
     setsid timeout --kill-after=5 "$budget" bash "$SCRIPT_DIR/scripts/run-service.sh" \
-      "$SCRIPT_DIR" "$ROOT_DIR/$svc/deploy.sh" "${flags[@]}" &
+      "$SCRIPT_DIR" "$(svc_dir "$svc")/deploy.sh" "${flags[@]}" &
   local pid=$!
   JOB_SERVICE[$pid]="$svc"; JOB_PHASE[$pid]="$phase"
   set_status "$svc" "$phase" RUNNING

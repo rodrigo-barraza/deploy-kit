@@ -410,6 +410,39 @@ done
         self.assert_ok(self.run_deploy('--changed-only'))
         self.assertTrue(self.events('build-start', 'fixture-service'))
 
+    def test_project_in_a_subdirectory_of_another_repository(self):
+        # A registry `dir` places a project inside a larger repository: it deploys
+        # from there, is never pulled, and only its own directory and `sources`
+        # count as its source.
+        self.add_service('game', 1)
+        crate = self.root / 'game/crates/svc'; crate.mkdir(parents=True)
+        for name in ['Dockerfile', 'docker-compose.yml', '.env']:
+            shutil.copy2(self.root / 'game' / name, crate / name)
+        (crate / 'deploy.sh').write_text((self.root / 'game/deploy.sh').read_text()
+            .replace('"game"', '"nested-service"')
+            .replace('source "${SCRIPT_DIR}/../deploy-kit/lib.sh"',
+                     'deploy_kit_path="${SCRIPT_DIR}/../../../deploy-kit"\nsource "$deploy_kit_path/lib.sh"'))
+        (self.root / 'game/crates/shared').mkdir()
+        (self.root / 'game/crates/shared/lib.txt').write_text('one')
+        (self.root / 'game/crates/other.txt').write_text('one')
+        self.commit('game', 'nested service')
+        self.registry['projects'] = [p for p in self.registry['projects'] if p['id'] != 'game']
+        self.enable_remotes()
+        self.registry['projects'].append({'id': 'nested-service', 'dir': 'game/crates/svc', 'sources': ['crates/shared'],
+            'deployTier': 1, 'deployTarget': 'target', 'port': 8100, 'healthPath': '/health/nested-service'})
+        self.save_registry(); self.commit('vault-service', 'nested')
+        self.assert_ok(self.run_deploy(skip_pull=False))
+        self.assertTrue(self.events('build-start', 'nested-service'))
+        self.assertTrue(self.events('pull', 'fixture-service'))
+        self.assertFalse(self.events('pull', 'nested-service'))
+        self.clear_events()
+        (self.root / 'game/crates/other.txt').write_text('two'); self.commit('game', 'elsewhere')
+        self.assert_ok(self.run_deploy('--changed-only'))
+        self.assertFalse(self.events('build-start', 'nested-service'))
+        (self.root / 'game/crates/shared/lib.txt').write_text('two'); self.commit('game', 'a source')
+        self.assert_ok(self.run_deploy('--changed-only'))
+        self.assertTrue(self.events('build-start', 'nested-service'))
+
     def test_untracked_nested_repository_is_not_source(self):
         self.assert_ok(self.run_deploy())
         self.clear_events()

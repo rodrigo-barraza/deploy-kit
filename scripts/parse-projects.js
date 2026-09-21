@@ -26,6 +26,15 @@ try {
   for (const project of configData.projects) {
     if (project.deployTier !== undefined && (!Number.isInteger(project.deployTier) || project.deployTier < 0 || project.deployTier > 64)) throw new Error(`Invalid deployTier: ${project.id}`);
   }
+  // A project that lives inside another repository (a crate of a monorepo) names
+  // its directory with `dir`, relative to the workspace root, and the paths outside
+  // it that its image is built from with `sources`, relative to that repository.
+  const validPath = value => typeof value === 'string' && value !== '' && !path.isAbsolute(value) &&
+    !/['\r\n]/.test(value) && !value.split('/').includes('..');
+  for (const project of configData.projects) {
+    if (project.dir !== undefined && !validPath(project.dir)) throw new Error(`Invalid dir: ${project.id}`);
+    if (project.sources !== undefined && !(Array.isArray(project.sources) && project.sources.every(validPath))) throw new Error(`Invalid sources: ${project.id}`);
+  }
   const host = configData.defaultHost || 'localhost';
 
   // Build device lookup
@@ -106,7 +115,8 @@ try {
   });
 
   for (const project of configData.projects) {
-    const projectDir = path.join(rootDir, project.id);
+    const projectDir = path.join(rootDir, project.dir || project.id);
+    if (project.dir) emit('SVC_DIR', project.id, project.dir);
     const packageJsonPath = path.join(projectDir, 'package.json');
     const detectedDependencies = new Set();
     const detectedLibraryDependencies = new Set();

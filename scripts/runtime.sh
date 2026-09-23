@@ -32,7 +32,7 @@ acquire_deploy_lock() {
 # then every build dead in 0 s on a missing docker.sock. Check it before any of
 # that; where Docker Desktop is installed (WSL), start it and wait for it.
 ensure_docker() {
-  local budget="${DOCKER_START_TIMEOUT:-120}" desktop deadline
+  local budget="${DOCKER_START_TIMEOUT:-120}" desktop cli deadline restarted=false
   positive_integer DOCKER_START_TIMEOUT "$budget" 3600 || return 1
   timeout --kill-after=5 15 docker info >/dev/null 2>&1 && return 0
   desktop="${DOCKER_DESKTOP_EXE:-/mnt/c/Program Files/Docker/Docker/Docker Desktop.exe}"
@@ -40,17 +40,38 @@ ensure_docker() {
     printf 'ERROR: the local Docker daemon is not answering (docker info failed); start Docker and re-run\n' >&2
     return 1
   fi
-  printf 'Docker is not running; starting Docker Desktop (waiting up to %ss)\n' "$budget" >&2
-  # Start-Process detaches it, so it outlives this run and its cancellation.
-  powershell.exe -NoProfile -Command "Start-Process -FilePath '$(wslpath -w "$desktop" 2>/dev/null || printf '%s' "$desktop")'" \
-    >/dev/null 2>&1 || true
   deadline=$((SECONDS + budget))
-  while [ "$SECONDS" -lt "$deadline" ]; do
+  # Docker Desktop can be running with its WSL integration stopped: `wsl --shutdown`
+  # under it leaves the engine up and no docker.sock in the distro (2026-09-22), and
+  # starting an already running Desktop does nothing. Only a restart re-attaches it,
+  # and a restart stops local containers, so it is skipped while any are running.
+  cli="${DOCKER_DESKTOP_CLI:-$(dirname "$desktop")/resources/bin/docker.exe}"
+  if [ -f "$cli" ] && timeout --kill-after=5 20 "$cli" desktop status 2>/dev/null | tr -d '\r' | grep -qE '^Status[[:space:]]+running[[:space:]]*$'; then
+    if [ -n "$(timeout --kill-after=5 20 "$cli" --context desktop-linux ps -q 2>/dev/null | tr -d '\r')" ]; then
+      printf 'ERROR: Docker Desktop is running but its WSL integration is stopped (no docker.sock in %s).\n' "${WSL_DISTRO_NAME:-this distro}" >&2
+      printf '       Local containers are running, so it was not restarted: click "Restart the WSL integration" in Docker Desktop, or run docker.exe desktop restart\n' >&2
+      return 1
+    fi
+    printf 'Docker Desktop is running but its WSL integration is stopped; restarting Docker Desktop (waiting up to %ss)\n' "$budget" >&2
+    timeout --kill-after=5 "$budget" "$cli" desktop restart >/dev/null 2>&1 || true
+    restarted=true
+  else
+    printf 'Docker is not running; starting Docker Desktop (waiting up to %ss)\n' "$budget" >&2
+    # Start-Process detaches it, so it outlives this run and its cancellation.
+    powershell.exe -NoProfile -Command "Start-Process -FilePath '$(wslpath -w "$desktop" 2>/dev/null || printf '%s' "$desktop")'" \
+      >/dev/null 2>&1 || true
+  fi
+  until timeout --kill-after=5 15 docker info >/dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      if $restarted; then
+        printf 'ERROR: Docker Desktop restarted but %s still has no docker.sock; check Settings > Resources > WSL integration\n' "${WSL_DISTRO_NAME:-this distro}" >&2
+      else
+        printf 'ERROR: Docker Desktop did not answer within %ss\n' "$budget" >&2
+      fi
+      return 1
+    fi
     sleep 2
-    timeout --kill-after=5 15 docker info >/dev/null 2>&1 && return 0
   done
-  printf 'ERROR: Docker Desktop did not answer within %ss\n' "$budget" >&2
-  return 1
 }
 start_deploy_agent() {
   local status=0

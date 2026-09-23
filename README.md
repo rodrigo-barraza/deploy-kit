@@ -19,7 +19,7 @@ source "${SCRIPT_DIR}/../deploy-kit/lib.sh"
 
 The library handles validation, dependency installation, tests, image builds, transfers, and container updates. A docker CLI that dies before the daemon has started building (`cannot allocate memory` reading `~/.docker` under a parallel build load, a daemon socket that briefly refuses) is retried twice (`BUILD_CLI_RETRIES`, `BUILD_RETRY_DELAY`, `BUILD_TRANSIENT_PATTERN`); a build the daemon ran, or one that timed out, is final. The orchestrator owns scheduling, health gates, deployment state, and cleanup. A failed prerequisite or health check produces a nonzero exit; later tiers do not restart after a failed tier.
 
-The orchestrator requires Bash 5.1+, Node.js, Git, Docker, curl, and the Linux/WSL tools `flock`, `setsid`, and `timeout`. Every run except a dry run checks that the local Docker daemon answers before it pulls or plans anything. If the daemon is down and Docker Desktop is installed (WSL), the run starts Docker Desktop and waits for it (`DOCKER_START_TIMEOUT`); otherwise it stops with nothing done. SSH targets also require an SSH agent and access to their configured host. The test suite uses Python 3's standard library.
+The orchestrator requires Bash 5.1+, Node.js, Git, Docker, curl, and the Linux/WSL tools `flock`, `setsid`, and `timeout`. Every run except a dry run checks that the local Docker daemon answers before it pulls or plans anything. If the daemon is down and Docker Desktop is installed (WSL), the run starts Docker Desktop and waits for it (`DOCKER_START_TIMEOUT`). If Docker Desktop is already running but its WSL integration is stopped (no `docker.sock` in the distro, as after a `wsl --shutdown` under it), the run restarts Docker Desktop instead, unless local containers are running, in which case it stops and names the fix; otherwise it stops with nothing done. SSH targets also require an SSH agent and access to their configured host. The test suite uses Python 3's standard library.
 
 ## Usage
 
@@ -149,6 +149,7 @@ Cleanup runs once locally and once per selected deployment host after workers fi
 | `BUILD_CACHE_MAX_AGE` | unset | Optional eviction age filter, e.g. `168h` |
 | `DOCKER_START_TIMEOUT` | `120` | How long to wait for Docker Desktop after starting it |
 | `DOCKER_DESKTOP_EXE` | `/mnt/c/Program Files/Docker/Docker/Docker Desktop.exe` | Docker Desktop to start when the daemon is down |
+| `DOCKER_DESKTOP_CLI` | `resources/bin/docker.exe` beside `DOCKER_DESKTOP_EXE` | Docker Desktop's Windows CLI, used to tell a stopped WSL integration from a stopped Desktop and to restart it |
 
 A linked deploy-kit worktree uses its own code while locating sibling repositories, shared configuration, and persistent state through the primary checkout. `DEPLOY_ROOT_DIR`, `DEPLOY_CONFIG_DIR`, `DEPLOY_STATE_ROOT`, and `PROJECTS_JSON_PATH` provide explicit overrides. Existing per-service wrappers continue to work through the runner's shared-library source adapter.
 

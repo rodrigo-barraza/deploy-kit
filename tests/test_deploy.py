@@ -32,7 +32,7 @@ class DeploymentTests(unittest.TestCase):
                         BUILD_PHASE_TIMEOUT='8', TRANSFER_PHASE_TIMEOUT='2', RESTART_PHASE_TIMEOUT='5',
                         HEALTH_GATE_TIMEOUT='1', HEALTH_GATE_INTERVAL='1',
                         CONTAINER_HEALTH_ATTEMPTS='1', CONTAINER_HEALTH_INTERVAL='1')
-        for key in ['DEPLOY_ROOT_DIR', 'DEPLOY_CONFIG_DIR', 'DEPLOY_STATE_ROOT', 'DEPLOY_ORCHESTRATED', 'PROJECTS_JSON_PATH', 'SKIP_TESTS', 'BASH_ENV']:
+        for key in ['DEPLOY_ROOT_DIR', 'DEPLOY_CONFIG_DIR', 'DEPLOY_STATE_ROOT', 'DEPLOY_ORCHESTRATED', 'PROJECTS_JSON_PATH', 'SKIP_TESTS', 'BASH_ENV', 'DOCKER_DESKTOP_EXE', 'DOCKER_DESKTOP_CLI']:
             self.env.pop(key, None)
         self.registry = {'projects': [], 'devices': [
             {'id': 'target', 'hostname': 'mock-target', 'dockerApi': 'mock-target', 'deploy': {'method': 'docker-api'}},
@@ -205,6 +205,29 @@ source "${SCRIPT_DIR}/../deploy-kit/lib.sh"
         self.assert_ok(self.run_deploy(env={'FAIL_DOCKER_INFO': '1', 'DOCKER_DESKTOP_EXE': str(desktop)}))
         self.assertEqual(len(starts()), 1); self.assertIn('Docker Desktop.exe', starts()[0])
         self.assertTrue(self.manifest('deployed').exists())
+
+    def test_docker_desktop_running_without_its_wsl_socket_is_restarted_not_started(self):
+        desktop = self.root / 'Docker Desktop.exe'; desktop.write_text('')
+        cli = self.bin / 'docker.exe'; shutil.copy2(KIT / 'tests/mock-command.py', cli); cli.chmod(0o755)
+        detached = {'DOCKER_DESKTOP_EXE': str(desktop), 'DOCKER_DESKTOP_CLI': str(cli), 'DESKTOP_STATUS': 'running'}
+        starts = lambda: [e for e in self.events('powershell.exe') if 'Start-Process' in e['args'][-1]]
+        restarts = lambda: [e for e in self.events('docker-desktop') if e['args'] == ['desktop', 'restart']]
+        # A restart would stop local containers: refuse at once, naming the fix, instead of waiting out the budget.
+        self.assert_failed(self.run_deploy(skip_pull=False, env=dict(detached, FAIL_DOCKER_INFO='99', DESKTOP_CONTAINERS='0f1e2d3c')))
+        self.assertIn('WSL integration is stopped', self.output); self.assertIn('Restart the WSL integration', self.output)
+        self.assertFalse(restarts()); self.assertFalse(starts())
+        self.assertFalse(self.events('pull')); self.assertFalse(self.events('build-start'))
+        # Nothing running locally: restart Docker Desktop (starting it again is a no-op) and deploy.
+        (self.root / 'docker-state.json').unlink(); self.clear_events()
+        self.assert_ok(self.run_deploy(env=dict(detached, FAIL_DOCKER_INFO='1')))
+        self.assertIn('restarting Docker Desktop', self.output)
+        self.assertEqual(len(restarts()), 1); self.assertFalse(starts())
+        self.assertTrue(self.manifest('deployed').exists())
+        # Restarted and still no socket: the integration is off for this distro, not slow.
+        (self.root / 'docker-state.json').unlink(); self.clear_events()
+        self.assert_failed(self.run_deploy(env=dict(detached, FAIL_DOCKER_INFO='99', DOCKER_START_TIMEOUT='1')))
+        self.assertIn('still has no docker.sock', self.output)
+        self.assertEqual(len(restarts()), 1)
 
     def test_final_tier_is_checked_and_a_redirect_that_never_lands_is_not_healthy(self):
         self.assert_failed(self.run_deploy(env={'FAIL_HEALTH': 'fixture-service', 'HEALTH_CODE': '302'}))

@@ -53,6 +53,15 @@ if cmd == 'pnpm':
 if cmd in ('ssh-add', 'ssh-agent', 'powershell.exe'):
     event(cmd, args=args)
     sys.exit(0)
+if cmd == 'docker.exe':
+    # Docker Desktop's Windows CLI, with its CRLF output. DESKTOP_STATUS=running|stopped,
+    # DESKTOP_CONTAINERS=<ids> — what `ps -q` lists on the Desktop engine.
+    event('docker-desktop', args=args)
+    if args[:2] == ['desktop', 'status']:
+        sys.stdout.write('Name                Value\r\nStatus              ' + os.environ.get('DESKTOP_STATUS', 'stopped') + '\r\n')
+    elif 'ps' in args and os.environ.get('DESKTOP_CONTAINERS'):
+        sys.stdout.write(os.environ['DESKTOP_CONTAINERS'] + '\r\n')
+    sys.exit(0)
 if cmd == 'curl':
     service = args[-1].rsplit('/', 1)[-1]
     event('health', service=service, follows='-L' in args)

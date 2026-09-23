@@ -51,6 +51,7 @@ BUILD_SECRETS="${BUILD_SECRETS:-}"
 BUILD_EXTRA_FLAGS="${BUILD_EXTRA_FLAGS:-}"
 BUILD_TAIL_LINES="${BUILD_TAIL_LINES:-5}"
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-600}"
+REMOTE_TIMEOUT="${REMOTE_TIMEOUT:-30}"
 SKIP_ENV_DEPLOY="${SKIP_ENV_DEPLOY:-false}"
 
 # ── BuildKit (default driver) ─────────────────────────────────
@@ -135,6 +136,7 @@ fail()  { printf '%s   %s✖ %s%s\n' "$(ts)" "$RED" "$1" "$RESET"; exit 1; }
 source "${DEPLOY_KIT_DIR}/scripts/runtime.sh"
 deploy_paths "$DEPLOY_KIT_DIR"
 positive_integer BUILD_TIMEOUT "$BUILD_TIMEOUT"
+positive_integer REMOTE_TIMEOUT "$REMOTE_TIMEOUT"
 positive_integer BUILD_TAIL_LINES "$BUILD_TAIL_LINES" 10000
 positive_integer DEPLOY_COMPRESSION_THREADS "${DEPLOY_COMPRESSION_THREADS:-2}" 64
 [[ "$IMAGE_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || fail 'Invalid IMAGE_NAME'
@@ -171,7 +173,8 @@ stop_build_ticker() {
 # took accounts-client down in 0 s on 2026-09-13 while forty builds shared the
 # box, and a daemon socket can refuse for a moment under the same load. Those
 # are retried; a build the daemon actually ran, or one that timed out, is final.
-BUILD_TRANSIENT_PATTERN="${BUILD_TRANSIENT_PATTERN:-cannot allocate memory|resource temporarily unavailable|error during connect|Cannot connect to the Docker daemon|connection reset by peer}"
+# `failed to connect to the docker API` is how Docker 29 says the socket refused.
+BUILD_TRANSIENT_PATTERN="${BUILD_TRANSIENT_PATTERN:-cannot allocate memory|resource temporarily unavailable|error during connect|Cannot connect to the Docker daemon|failed to connect to the docker API|connection reset by peer}"
 BUILD_CLI_RETRIES="${BUILD_CLI_RETRIES:-2}"
 BUILD_RETRY_DELAY="${BUILD_RETRY_DELAY:-5}"
 build_died_before_building() {
@@ -190,7 +193,11 @@ cleanup_service() {
 trap cleanup_service EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-if [ "${DEPLOY_ORCHESTRATED:-false}" != true ]; then acquire_deploy_lock; fi
+if [ "${DEPLOY_ORCHESTRATED:-false}" != true ]; then
+  acquire_deploy_lock
+  # The orchestrator checked before it pulled. A restart needs no local daemon.
+  if ! $DRY_RUN && ! $RESTART_ONLY; then ensure_docker || fail 'Docker is required for a deployment'; fi
+fi
 if ! $DRY_RUN; then
   if [ -z "${DEPLOY_LOG_DIR:-}" ]; then
     mkdir -p "${DEPLOY_KIT_DIR}/.deploy-logs"
@@ -629,7 +636,7 @@ fi
 ssh_docker() {
   local command
   printf -v command '%q ' sudo "$DEPLOY_DOCKER_BIN" "$@"
-  ssh -o ConnectTimeout=8 -o BatchMode=yes "$DEPLOY_SSH_HOST" "$command"
+  timeout --kill-after=5 "$REMOTE_TIMEOUT" ssh -o ConnectTimeout=8 -o BatchMode=yes "$DEPLOY_SSH_HOST" "$command"
 }
 
 # ── Shared: verify container is running after restart ─────────
@@ -637,6 +644,22 @@ ssh_docker() {
 # (30s in every compose file here), so a fresh container answers `starting` for
 # that long however fast it boots. The default budget outlasts that first probe
 # and one retry, in case the start period hides an early miss.
+#
+# While it answers `starting`, run the container's own health test ourselves —
+# the same command, just not on Docker's clock. Waiting for the scheduled probe
+# was 33–44 s of every restart (2026-09-13, 09-20), and the NAS's Docker 24
+# predates `start_interval`, which would otherwise shorten it.
+probe_container_now() {
+  local test probe=()
+  test=$("$@" inspect --format '{{json .Config.Healthcheck.Test}}' "$IMAGE_NAME" 2>/dev/null) || return 1
+  mapfile -d '' -t probe < <(node -e '
+    const [kind, ...rest] = JSON.parse(process.argv[1] || "null") || [];
+    const argv = kind === "CMD" ? rest : kind === "CMD-SHELL" ? ["/bin/sh", "-c", rest.join(" ")] : [];
+    process.stdout.write(argv.map(arg => arg + "\0").join(""));
+  ' "$test" 2>/dev/null)
+  [ "${#probe[@]}" -gt 0 ] || return 1
+  "$@" exec "$IMAGE_NAME" "${probe[@]}" >/dev/null 2>&1
+}
 verify_container() {
   local attempts="${CONTAINER_HEALTH_ATTEMPTS:-45}" interval="${CONTAINER_HEALTH_INTERVAL:-2}" result attempt waiting=false
   positive_integer CONTAINER_HEALTH_ATTEMPTS "$attempts" 1000
@@ -645,7 +668,9 @@ verify_container() {
     result=$("$@" inspect --format '{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$IMAGE_NAME" 2>/dev/null || true)
     case "$result" in
       'true|'|'true|healthy') ok "Container running: $IMAGE_NAME"; return 0 ;;
-      'true|starting') $waiting || { info "Container up, health check starting — waiting up to $((attempts * interval))s"; waiting=true; } ;;
+      'true|starting')
+        if probe_container_now "$@"; then ok "Container running: $IMAGE_NAME (its health test passes)"; return 0; fi
+        $waiting || { info "Container up, health check starting — waiting up to $((attempts * interval))s"; waiting=true; } ;;
     esac
     if [ "$attempt" -lt "$attempts" ]; then sleep "$interval"; fi
   done
@@ -664,7 +689,7 @@ deploy_docker_api() {
   fi
 
   # Verify connectivity
-  if ! docker -H "$remote_host" info > /dev/null 2>&1; then
+  if ! timeout --kill-after=5 "$REMOTE_TIMEOUT" docker -H "$remote_host" info > /dev/null 2>&1; then
     info "If Docker or its TCP API isn't set up on ${DEPLOY_TARGET} yet, bootstrap it with:"
     info "  npm run bootstrap:host -- <user>@${DEPLOY_HOSTNAME:-<host>}"
     fail "Cannot connect to Docker API at ${remote_host}"
@@ -741,7 +766,7 @@ deploy_docker_api() {
     fi
 
     # Verify container running
-    verify_container docker -H "$remote_host"
+    verify_container timeout --kill-after=5 "$REMOTE_TIMEOUT" docker -H "$remote_host"
 
     if [ "${DEPLOY_ORCHESTRATED:-false}" != true ]; then
       docker -H "$remote_host" image prune -f >/dev/null 2>&1 || true

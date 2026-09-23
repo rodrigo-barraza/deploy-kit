@@ -90,6 +90,15 @@ if '-H' in args:
     index = args.index('-H'); host = args[index + 1]; del args[index:index + 2]
 service = os.environ.get('DEPLOY_SERVICE_ID', Path.cwd().name)
 event('docker', args=args, host=host, service=service)
+if args[:1] == ['info'] and host == 'local':
+    # FAIL_DOCKER_INFO=<n> — the local daemon is down for the first n checks.
+    with state() as data:
+        checks = data.get('info_checks', 0); data['info_checks'] = checks + 1
+    if checks < int(os.environ.get('FAIL_DOCKER_INFO', '0')):
+        print('failed to connect to the docker API at unix:///var/run/docker.sock', file=sys.stderr); sys.exit(1)
+    sys.exit(0)
+if args == ['builder', 'prune', '--help']:
+    print('      --reserved-space bytes   Amount of disk space always allowed to keep for cache'); sys.exit(0)
 if args[:2] == ['buildx', 'build']:
     if '-t' in args: service = args[args.index('-t') + 1].split(':')[0]
     # FAIL_BUILD_CLI=<service>:<n> — the docker CLI dies n times before the daemon builds anything.
@@ -127,15 +136,25 @@ if args[:2] == ['image', 'inspect']:
     print(image); sys.exit(0)
 if args and args[0] == 'inspect':
     if host == 'local': sys.exit(1)  # no previous git.sha label; exercise host sync
+    status = not any('{{.Image}}' in arg or 'Healthcheck' in arg for arg in args)
     with state() as data:
         container = data['containers'].get(host, {}).get(args[-1])
         if not container: sys.exit(1)
         starting = container.get('running') and container.get('starting', 0) > 0
-        if starting: container['starting'] -= 1
+        if starting and status: container['starting'] -= 1
     if '{{.Image}}' in args: print('sha256:previous-container')
+    elif any('Healthcheck' in arg for arg in args): print('["CMD","wget","-qO-","http://localhost/health"]')
     elif starting: print('true|starting')
     else: print('true|healthy' if container.get('running') else 'false|')
     sys.exit(0)
+if args and args[0] == 'exec':
+    # The container's own health test, run by the restart gate. PROBE_FAILS=<service>
+    # is an app still booting: its test fails until Docker's own probe says healthy.
+    name = args[1]
+    event('probe', service=name, host=host, args=args[2:])
+    with state() as data: container = data['containers'].get(host, {}).get(name, {})
+    healthy = container.get('running') and os.environ.get('PROBE_FAILS') != name
+    sys.exit(0 if healthy else 1)
 if args and args[0] == 'save':
     print(args[1].split(':')[0]); sys.exit(0)
 if args and args[0] == 'load':

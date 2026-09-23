@@ -80,7 +80,7 @@ for arg in "$@"; do
     --clients) GROUP="${GROUP:+${GROUP},}client" ;; --services) GROUP="${GROUP:+${GROUP},}service" ;;
     --bots) GROUP="${GROUP:+${GROUP},}bot" ;; --vault) GROUP="${GROUP:+${GROUP},}vault" ;;
     --max-builds=*) MAX_CONCURRENT_BUILDS="${arg#*=}" ;;
-    --help|-h) sed -n '17,44s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    --help|-h) sed -n '20,44s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) die "Unknown or empty option: ${arg}. Use --help." ;;
   esac
 done
@@ -206,6 +206,9 @@ export DEPLOY_LOG_DIR="$LOG_DIR"
 info "Deployment logs: $LOG_DIR"
 $DRY_RUN && info 'DRY RUN — validation only; hooks, pulls, builds, and remote actions are skipped'
 $SKIP_TESTS && warn 'Tests are explicitly disabled for this run'
+# Before pulls and planning: planning asks the daemon which built images can be
+# reused, and a daemon that is down reads as "none".
+if ! $DRY_RUN; then ensure_docker || die 'Docker is required for a deployment'; fi
 
 # Keep main-process network work interruptible too (not just service workers).
 run_foreground() {
@@ -698,7 +701,10 @@ if ! $DRY_RUN && ! $aborted && [ "$changed_count" -gt 0 ]; then
   done
   if [ "${#local_tags[@]}" -gt 0 ]; then docker rmi "${local_tags[@]}" > "$LOG_DIR/local-tags.log" 2>&1 || warn 'Some local tags could not be removed'; fi
   run_foreground "$REMOTE_TIMEOUT" docker image prune -f > "$LOG_DIR/local-prune.log" 2>&1 || warn 'Local image cleanup failed'
-  cache_flags=(--keep-storage "$BUILD_CACHE_KEEP_STORAGE")
+  # Docker 28 renamed --keep-storage to --reserved-space and warns on the old name.
+  reserve_flag=--keep-storage
+  if docker builder prune --help 2>/dev/null | grep -q -- --reserved-space; then reserve_flag=--reserved-space; fi
+  cache_flags=("$reserve_flag" "$BUILD_CACHE_KEEP_STORAGE")
   [ -z "$BUILD_CACHE_MAX_AGE" ] || cache_flags+=(--filter "until=$BUILD_CACHE_MAX_AGE")
   run_foreground "$BUILD_PHASE_TIMEOUT" docker builder prune -f --all "${cache_flags[@]}" \
     > "$LOG_DIR/build-cache.log" 2>&1 || warn 'Build cache cleanup failed'

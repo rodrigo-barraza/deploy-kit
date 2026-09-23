@@ -27,6 +27,31 @@ acquire_deploy_lock() {
   exec 9>"${lock_dir}/deploy-kit-${UID}-${key%% *}.lock"
   flock -n 9 || { printf 'ERROR: Another deployment is running for %s\n' "$ROOT_DIR" >&2; return 1; }
 }
+# Every build and transfer needs the local daemon. Docker Desktop not running cost
+# five whole runs on 2026-09-18/20: pulls, planning and a remote network prune,
+# then every build dead in 0 s on a missing docker.sock. Check it before any of
+# that; where Docker Desktop is installed (WSL), start it and wait for it.
+ensure_docker() {
+  local budget="${DOCKER_START_TIMEOUT:-120}" desktop deadline
+  positive_integer DOCKER_START_TIMEOUT "$budget" 3600 || return 1
+  timeout --kill-after=5 15 docker info >/dev/null 2>&1 && return 0
+  desktop="${DOCKER_DESKTOP_EXE:-/mnt/c/Program Files/Docker/Docker/Docker Desktop.exe}"
+  if [ ! -f "$desktop" ] || ! command -v powershell.exe >/dev/null 2>&1; then
+    printf 'ERROR: the local Docker daemon is not answering (docker info failed); start Docker and re-run\n' >&2
+    return 1
+  fi
+  printf 'Docker is not running; starting Docker Desktop (waiting up to %ss)\n' "$budget" >&2
+  # Start-Process detaches it, so it outlives this run and its cancellation.
+  powershell.exe -NoProfile -Command "Start-Process -FilePath '$(wslpath -w "$desktop" 2>/dev/null || printf '%s' "$desktop")'" \
+    >/dev/null 2>&1 || true
+  deadline=$((SECONDS + budget))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 2
+    timeout --kill-after=5 15 docker info >/dev/null 2>&1 && return 0
+  done
+  printf 'ERROR: Docker Desktop did not answer within %ss\n' "$budget" >&2
+  return 1
+}
 start_deploy_agent() {
   local status=0
   ssh-add -l >/dev/null 2>&1 || status=$?

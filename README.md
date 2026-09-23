@@ -19,7 +19,7 @@ source "${SCRIPT_DIR}/../deploy-kit/lib.sh"
 
 The library handles validation, dependency installation, tests, image builds, transfers, and container updates. A docker CLI that dies before the daemon has started building (`cannot allocate memory` reading `~/.docker` under a parallel build load, a daemon socket that briefly refuses) is retried twice (`BUILD_CLI_RETRIES`, `BUILD_RETRY_DELAY`, `BUILD_TRANSIENT_PATTERN`); a build the daemon ran, or one that timed out, is final. The orchestrator owns scheduling, health gates, deployment state, and cleanup. A failed prerequisite or health check produces a nonzero exit; later tiers do not restart after a failed tier.
 
-The orchestrator requires Bash 5.1+, Node.js, Git, Docker, curl, and the Linux/WSL tools `flock`, `setsid`, and `timeout`. SSH targets also require an SSH agent and access to their configured host. The test suite uses Python 3's standard library.
+The orchestrator requires Bash 5.1+, Node.js, Git, Docker, curl, and the Linux/WSL tools `flock`, `setsid`, and `timeout`. Every run except a dry run checks that the local Docker daemon answers before it pulls or plans anything. If the daemon is down and Docker Desktop is installed (WSL), the run starts Docker Desktop and waits for it (`DOCKER_START_TIMEOUT`); otherwise it stops with nothing done. SSH targets also require an SSH agent and access to their configured host. The test suite uses Python 3's standard library.
 
 ## Usage
 
@@ -124,7 +124,7 @@ The parent collects every worker's exit code, including unexpected termination. 
 
 When a service moves devices, the old container remains running during preparation. After a successful build/transfer, the script stops it, starts the replacement, and checks health. Failure restores the old container after confirming the replacement is stopped; success removes the old container and records the new target. If a device becomes unreachable during recovery, the retained container and migration log provide the recovery path; the run fails instead of reporting success.
 
-Shared wrappers update services with `docker compose up -d --remove-orphans --no-build --pull never`, avoiding an unconditional `down`. Docker container health checks and registry HTTP checks both participate in validation. An automatic SSH deployment cannot fall back to an uncompleted SMB export and report success. Standalone SMB export still provides manual recovery instructions and returns failure until those steps are completed.
+Shared wrappers update services with `docker compose up -d --remove-orphans --no-build --pull never`, avoiding an unconditional `down`. Docker container health checks and registry HTTP checks both participate in validation. Docker runs a new container's first health probe one `interval` after start (30 s in these compose files), and the NAS's Docker 24 does not support `start_interval`. So while Docker still reports `starting`, the restart gate runs the container's own health test itself with `docker exec`. The test is the same; the gate just doesn't wait for Docker's schedule. If that test fails (the app is still booting), the gate falls back to waiting for Docker's verdict. An automatic SSH deployment cannot fall back to an uncompleted SMB export and report success. Standalone SMB export still provides manual recovery instructions and returns failure until those steps are completed.
 
 Legacy wrappers without the shared library are validated with their dry-run mode during preparation; their full deployment runs in the restart tier. They are never passed unsupported transfer/restart-only modes, and a build-only run does not execute their remote image pulls.
 
@@ -138,15 +138,17 @@ Cleanup runs once locally and once per selected deployment host after workers fi
 | `BUILD_TIMEOUT` | `600` | Docker build itself, in seconds |
 | `TRANSFER_PHASE_TIMEOUT` | `600` | Image transfer phase, in seconds |
 | `RESTART_PHASE_TIMEOUT` | `180` | Container update phase, in seconds |
-| `REMOTE_TIMEOUT` | `30` | Remote preflight, cleanup, and migration command timeout |
+| `REMOTE_TIMEOUT` | `30` | Remote preflight, cleanup, migration, and restart-gate command timeout |
 | `HEALTH_GATE_TIMEOUT` | `60` | HTTP health budget for an entire tier |
 | `HEALTH_GATE_INTERVAL` | `3` | Delay between health rounds |
-| `CONTAINER_HEALTH_ATTEMPTS` | `45` | Container inspect rounds after a restart; outlasts Docker's first health probe (one `interval` after start) |
+| `CONTAINER_HEALTH_ATTEMPTS` | `45` | Container inspect rounds after a restart; outlasts Docker's first health probe (one `interval` after start) when the container's own health test does not pass sooner |
 | `CONTAINER_HEALTH_INTERVAL` | `2` | Delay between container inspect rounds |
 | `MAX_CONCURRENT_SSH` | `8` | Concurrent repository pulls and transfer/restart workers |
 | `DEPLOY_COMPRESSION_THREADS` | `2` | Threads per pigz compressor |
-| `BUILD_CACHE_KEEP_STORAGE` | `20GB` | Cache storage to retain |
+| `BUILD_CACHE_KEEP_STORAGE` | `20GB` | Cache storage to retain (`--reserved-space` on Docker 28+, `--keep-storage` before) |
 | `BUILD_CACHE_MAX_AGE` | unset | Optional eviction age filter, e.g. `168h` |
+| `DOCKER_START_TIMEOUT` | `120` | How long to wait for Docker Desktop after starting it |
+| `DOCKER_DESKTOP_EXE` | `/mnt/c/Program Files/Docker/Docker/Docker Desktop.exe` | Docker Desktop to start when the daemon is down |
 
 A linked deploy-kit worktree uses its own code while locating sibling repositories, shared configuration, and persistent state through the primary checkout. `DEPLOY_ROOT_DIR`, `DEPLOY_CONFIG_DIR`, `DEPLOY_STATE_ROOT`, and `PROJECTS_JSON_PATH` provide explicit overrides. Existing per-service wrappers continue to work through the runner's shared-library source adapter.
 

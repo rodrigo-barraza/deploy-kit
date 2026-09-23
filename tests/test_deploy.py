@@ -167,12 +167,44 @@ source "${SCRIPT_DIR}/../deploy-kit/lib.sh"
         self.assertFalse(self.manifest('deployed', 'vault-service').exists())
 
     def test_container_gate_outlasts_the_first_health_probe(self):
-        probing = {'STARTING_PROBES': 'vault-service:3', 'CONTAINER_HEALTH_ATTEMPTS': '5'}
+        # An app still booting fails its own health test, so the gate waits on Docker.
+        probing = {'STARTING_PROBES': 'vault-service:3', 'CONTAINER_HEALTH_ATTEMPTS': '5', 'PROBE_FAILS': 'vault-service'}
         self.assert_ok(self.run_deploy(env=probing))
         self.assertTrue(self.manifest('deployed', 'vault-service').exists())
         self.assertIn('health check starting', self.output)
         self.assert_failed(self.run_deploy(env=dict(probing, CONTAINER_HEALTH_ATTEMPTS='2')))
         self.assertIn('did not become running/healthy (status: true|starting)', self.output)
+
+    def test_a_passing_health_test_does_not_wait_for_dockers_first_probe(self):
+        # Docker would answer `starting` three more times; one inspect is all the budget there is.
+        self.assert_ok(self.run_deploy(env={'STARTING_PROBES': 'vault-service:3', 'CONTAINER_HEALTH_ATTEMPTS': '1'}))
+        probes = self.events('probe', 'vault-service')
+        self.assertEqual(len(probes), 1); self.assertEqual(probes[0]['args'], ['wget', '-qO-', 'http://localhost/health'])
+        self.assertIn('Container running: vault-service (its health test passes)', self.output)
+        self.assertTrue(self.manifest('deployed', 'vault-service').exists())
+
+    def test_the_health_test_crosses_the_ssh_boundary_intact(self):
+        self.registry['devices'][0]['deploy'] = {'method': 'ssh', 'composeRoot': '/mock remote'}
+        self.registry['devices'][0]['sshAlias'] = 'fake-nas'
+        self.save_registry()
+        self.assert_ok(self.run_deploy('--only=fixture-service', env={'STARTING_PROBES': 'fixture-service:3', 'CONTAINER_HEALTH_ATTEMPTS': '1'}))
+        self.assertEqual([e['args'] for e in self.events('probe', 'fixture-service')], [['wget', '-qO-', 'http://localhost/health']])
+        self.assertTrue(self.manifest('deployed').exists())
+
+    def test_docker_down_fails_before_any_work_unless_docker_desktop_starts(self):
+        missing = {'FAIL_DOCKER_INFO': '99', 'DOCKER_DESKTOP_EXE': str(self.root / 'absent.exe')}
+        self.assert_failed(self.run_deploy(skip_pull=False, env=missing))
+        self.assertIn('Docker is required for a deployment', self.output)
+        self.assertFalse(self.events('pull')); self.assertFalse(self.events('build-start'))
+        self.assertFalse([e for e in self.events('docker') if e['host'] != 'local'])
+        starts = lambda: [e['args'][-1] for e in self.events('powershell.exe') if 'Start-Process' in e['args'][-1]]
+        self.assertFalse(starts())
+        desktop = self.root / 'Docker Desktop.exe'; desktop.write_text('')
+        (self.root / 'docker-state.json').unlink()
+        self.clear_events()
+        self.assert_ok(self.run_deploy(env={'FAIL_DOCKER_INFO': '1', 'DOCKER_DESKTOP_EXE': str(desktop)}))
+        self.assertEqual(len(starts()), 1); self.assertIn('Docker Desktop.exe', starts()[0])
+        self.assertTrue(self.manifest('deployed').exists())
 
     def test_final_tier_is_checked_and_a_redirect_that_never_lands_is_not_healthy(self):
         self.assert_failed(self.run_deploy(env={'FAIL_HEALTH': 'fixture-service', 'HEALTH_CODE': '302'}))
@@ -337,8 +369,8 @@ source "${SCRIPT_DIR}/../deploy-kit/lib.sh"
         local = [e for e in docker if e['host'] == 'local' and e['args'][:2] == ['image', 'prune']]
         remote = [e for e in docker if e['host'] == 'mock-target' and e['args'][:2] == ['image', 'prune']]
         self.assertEqual(len(local), 1); self.assertEqual(len(remote), 1)
-        cache = next(e for e in docker if e['args'][:2] == ['builder', 'prune'])
-        self.assertIn('--keep-storage', cache['args']); self.assertIn('20GB', cache['args'])
+        cache = next(e for e in docker if e['args'][:2] == ['builder', 'prune'] and '--help' not in e['args'])
+        self.assertIn('--reserved-space', cache['args']); self.assertIn('20GB', cache['args'])
         for e in self.events('restart'): self.assertIn('--no-build', e['args'])
 
     def test_compose_failure_restores_local_env(self):
@@ -587,7 +619,7 @@ docker -H mock-target compose up -d
 
     def test_optional_cache_age_and_no_cache_forces_rebuild(self):
         self.assert_ok(self.run_deploy('--build-only', env={'BUILD_CACHE_MAX_AGE':'24h'}))
-        cache = next(e for e in self.events('docker') if e['args'][:2] == ['builder','prune'])
+        cache = next(e for e in self.events('docker') if e['args'][:2] == ['builder','prune'] and '--help' not in e['args'])
         self.assertIn('until=24h', cache['args'])
         self.clear_events()
         self.assert_ok(self.run_deploy('--build-only', '--no-cache'))

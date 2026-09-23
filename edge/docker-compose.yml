@@ -1,21 +1,21 @@
 # Edge proxy (Caddy) — NOT part of the regular deploy fleet until
 # edge.config.json enabled:true and deploy-edge.sh ships it.
 #
-# Runs on host ports 18080/18443; the public cutover is a ROUTER change
-# (forward 80→18080, 443→18443), leaving DSM's own proxy untouched as
-# rollback. Secrets (DNS provider API keys) come from .env in this
-# directory on the NAS — see README.
+# HOST networking: Caddy listens on the NAS's 18080/18443 itself (the
+# Caddyfile's http_port/https_port, from edge.config.json) and the router
+# forwards public 80→18080, 443→18443. Published bridge ports hid every
+# visitor behind the Docker gateway address, so X-Forwarded-For carried
+# 172.16.50.1 for all internet traffic. Secrets (DNS provider API keys)
+# come from .env in this directory on the NAS — see README.
 
 services:
   edge-caddy:
     image: edge-caddy:latest
     container_name: edge-caddy
     restart: unless-stopped
-    ports:
-      - "18080:80"
-      - "18443:443"
-      - "18443:443/udp" # HTTP/3
-      - "127.0.0.1:2019:2019" # admin API — localhost only
+    # Listens on 18080, 18443 (+ UDP for HTTP/3) and the admin API on
+    # localhost:2019 — all set in the generated Caddyfile.
+    network_mode: host
     environment:
       - PORKBUN_API_KEY=${PORKBUN_API_KEY:-}
       - PORKBUN_API_SECRET_KEY=${PORKBUN_API_SECRET_KEY:-}

@@ -138,6 +138,24 @@ gitignored; adoption rebuilds it if lost).
    portal watchdog.
 7. After a quiet week: delete the DSM reverse-proxy rules.
 
+## Real client IPs (host networking)
+
+`edge-caddy` runs with `network_mode: host` and listens on `httpPort`/`httpsPort`
+itself. On a bridge network the Synology hands Caddy every connection from the
+Docker gateway (172.16.50.1), so every service saw that address in
+X-Forwarded-For — sessions-service stored it for 100 % of visits (no geo). Caddy
+is the first hop and replaces any client-sent X-Forwarded-For with the address
+it saw, so the header is trustworthy downstream.
+
+- Moving an existing bridge-networked edge to host networking is
+  `npm run edge:deploy` (the container is recreated: a few seconds of downtime).
+  Until then `edge:sync` (the tail of every `npm run deploy`) refuses to reload
+  the new Caddyfile into the bridge container, where its listeners would be
+  unreachable.
+- HTTP/3: Caddy advertises `alt-svc: h3=":<httpsPort>"`, so browsers reach for
+  UDP 18443 on the public IP. Forward UDP 18443 → NAS:18443 on the router to
+  keep HTTP/3; without it browsers quietly stay on HTTP/2.
+
 ## Notes
 
 - Certificates live in `<composeDir>/caddy-data` — persist it (it's in the

@@ -126,6 +126,8 @@ When a service moves devices, the old container remains running during preparati
 
 Shared wrappers update services with `docker compose up -d --remove-orphans --no-build --pull never`, avoiding an unconditional `down`. Docker container health checks and registry HTTP checks both participate in validation. Docker runs a new container's first health probe one `interval` after start (30 s in these compose files), and the NAS's Docker 24 does not support `start_interval`. So while Docker still reports `starting`, the restart gate runs the container's own health test itself with `docker exec`. The test is the same; the gate just doesn't wait for Docker's schedule. If that test fails (the app is still booting), the gate falls back to waiting for Docker's verdict. An automatic SSH deployment cannot fall back to an uncompleted SMB export and report success. Standalone SMB export still provides manual recovery instructions and returns failure until those steps are completed.
 
+After `up`, every container of the deployed stack that the compose file gave `restart: unless-stopped` is switched to `always` (`DEPLOY_RESTART_POLICY`). Synology's Container Manager stops every container explicitly when its package stops or updates. `unless-stopped` then leaves them all down, which is what happened on 2026-09-23. `always` brings them back when the engine starts. One-shot jobs (`no`, `on-failure`) keep their policy. To keep a service off, remove its container or set `docker update --restart=no`; stopping it is not enough.
+
 Legacy wrappers without the shared library are validated with their dry-run mode during preparation; their full deployment runs in the restart tier. They are never passed unsupported transfer/restart-only modes, and a build-only run does not execute their remote image pulls.
 
 ## Resource limits and worktrees
@@ -217,6 +219,7 @@ recorded here so a fresh NAS or a replaced router does not silently lose it.
 | `BUILD_EXTRA_FLAGS` | ❌ | `""` | Extra Docker build flags (e.g. `--network=host`) |
 | `BUILD_TAIL_LINES` | ❌ | `5` | Lines of build output to show |
 | `SKIP_ENV_DEPLOY` | ❌ | `false` | Skip `.env.deploy` validation |
+| `DEPLOY_RESTART_POLICY` | ❌ | `always` | Policy set after `up` on the stack's `unless-stopped` containers (`unless-stopped` turns it off) |
 
 ## Multi-Device Deployment
 

@@ -143,6 +143,25 @@ if args[:2] == ['image', 'inspect']:
     with state() as data: image = data['images'].get(args[-1].split(':')[0])
     if not image: sys.exit(1)
     print(image); sys.exit(0)
+if args and args[0] == 'inspect' and any('RestartPolicy' in arg for arg in args):
+    # The restart-policy pin reads each stack container's policy: the service
+    # itself (unless-stopped, as the compose files say, until updated) and a
+    # STACK_JOB=<service>:<name> one-shot job the compose file gave `no`.
+    names = [arg for arg in args[1:] if not arg.startswith('--') and 'RestartPolicy' not in arg]
+    with state() as data:
+        containers = data['containers'].get(host, {})
+        for name in names:
+            if name not in containers: sys.exit(1)
+            print(f"/{name} {containers[name].get('restart', 'unless-stopped')}")
+    sys.exit(0)
+if args and args[0] == 'update':
+    policy = next(arg.split('=', 1)[1] for arg in args if arg.startswith('--restart='))
+    names = [arg for arg in args[1:] if not arg.startswith('--')]
+    event('update', host=host, args=args, names=names)
+    with state() as data:
+        containers = data['containers'].get(host, {})
+        for name in names: containers[name]['restart'] = policy
+    sys.exit(0)
 if args and args[0] == 'inspect':
     if host == 'local': sys.exit(1)  # no previous git.sha label; exercise host sync
     status = not any('{{.Image}}' in arg or 'Healthcheck' in arg for arg in args)
@@ -186,6 +205,13 @@ if args and args[0] == 'compose':
         starting = int(probes[1]) if probes[0] == service else 0
         with state() as data:
             data['containers'].setdefault(host, {})[service] = {'running': True, 'starting': starting}
+            job_service, _, job = os.environ.get('STACK_JOB', '').partition(':')
+            if job_service == service:
+                data['containers'][host][job] = {'running': False, 'restart': 'no'}
+    elif 'ps' in args:
+        job_service, _, job = os.environ.get('STACK_JOB', '').partition(':')
+        with state() as data: containers = data['containers'].get(host, {})
+        print('\n'.join(name for name in [service, job if job_service == service else None] if name and name in containers))
     sys.exit(0)
 if args and args[0] == 'ps':
     with state() as data: containers = dict(data['containers'].get(host, {}))

@@ -77,6 +77,7 @@ DEPLOY_HOSTNAME="${DEPLOY_HOSTNAME:-}"                # target IP
 DEPLOY_ARCH="${DEPLOY_ARCH:-}"                        # amd64 | arm64 (empty = host arch)
 DEPLOY_SSH_HOST="${DEPLOY_SSH_HOST:-nas}"             # SSH config alias
 DEPLOY_DOCKER_BIN="${DEPLOY_DOCKER_BIN:-/usr/local/bin/docker}"
+DEPLOY_RESTART_POLICY="${DEPLOY_RESTART_POLICY:-always}" # see pin_restart_policy
 DEPLOY_DOCKER_API="${DEPLOY_DOCKER_API:-}"            # tcp://host:port
 DEPLOY_COMPOSE_ROOT="${DEPLOY_COMPOSE_ROOT:-/volume1/docker}"
 DEPLOY_SMB_ROOT="${DEPLOY_SMB_ROOT:-/mnt/k}"
@@ -639,6 +640,37 @@ ssh_docker() {
   timeout --kill-after=5 "$REMOTE_TIMEOUT" ssh -o ConnectTimeout=8 -o BatchMode=yes "$DEPLOY_SSH_HOST" "$command"
 }
 
+# ── Shared: restart policy after compose up ──────────────────
+# A deployed container comes back whenever the Docker engine starts, even
+# after something stopped it. The compose files say `unless-stopped`, which
+# leaves a container down for good once anything has stopped it explicitly —
+# and Synology's Container Manager stops every container explicitly when the
+# package stops or updates: 2026-09-23 15:48 that left all 51 NAS containers
+# down until they were started by hand. `always` restarts them when the
+# engine starts again. Only containers the compose file gave `unless-stopped`
+# change, so a one-shot job (`no`, `on-failure`) never becomes a restart loop.
+# To keep a service off, remove it or `docker update --restart=no` it.
+# $1: the stack's container ids; the rest: the docker command to reach them.
+pin_restart_policy() {
+  local ids="$1" policies targets
+  shift
+  [ "$DEPLOY_RESTART_POLICY" = unless-stopped ] && return 0
+  if [ -z "${ids//[[:space:]]/}" ]; then
+    warn "No containers listed for ${IMAGE_NAME}: restart policy left as the compose file set it"
+    return 0
+  fi
+  # shellcheck disable=SC2086 # container ids, one word each
+  policies=$("$@" inspect --format '{{.Name}} {{.HostConfig.RestartPolicy.Name}}' $ids 2>/dev/null) || policies=""
+  targets=$(awk '$2 == "unless-stopped" { sub(/^\//, "", $1); printf "%s ", $1 }' <<< "$policies")
+  [ -z "$targets" ] && return 0
+  # shellcheck disable=SC2086
+  if "$@" update --restart="$DEPLOY_RESTART_POLICY" $targets >/dev/null 2>&1; then
+    ok "Restart policy ${DEPLOY_RESTART_POLICY}: ${targets% }"
+  else
+    warn "Could not set restart=${DEPLOY_RESTART_POLICY} on ${targets% }: after a Docker restart they stay down until started by hand"
+  fi
+}
+
 # ── Shared: verify container is running after restart ─────────
 # Docker runs a container's first health probe one `interval` after it starts
 # (30s in every compose file here), so a fresh container answers `starting` for
@@ -756,6 +788,10 @@ deploy_docker_api() {
     if COMPOSE_OUTPUT=$(DOCKER_HOST="$remote_host" docker compose "${compose_files[@]}" \
       up -d --remove-orphans --no-build --pull never 2>&1); then COMPOSE_EXIT=0; else COMPOSE_EXIT=$?; fi
     printf '%s\n' "$COMPOSE_OUTPUT" | sed 's/^/ /'
+    local stack_ids=""
+    if [ "$COMPOSE_EXIT" -eq 0 ]; then
+      stack_ids=$(DOCKER_HOST="$remote_host" timeout --kill-after=5 "$REMOTE_TIMEOUT" docker compose "${compose_files[@]}" ps -aq 2>/dev/null || true)
+    fi
     restore_deploy_env
 
     if echo "$COMPOSE_OUTPUT" | grep -qiE 'could not find an available.*address pool|port is already allocated|driver failed programming'; then
@@ -764,6 +800,8 @@ deploy_docker_api() {
     if [ "$COMPOSE_EXIT" -ne 0 ]; then
       fail "Container restart failed (exit ${COMPOSE_EXIT})"
     fi
+
+    pin_restart_policy "$stack_ids" timeout --kill-after=5 "$REMOTE_TIMEOUT" docker -H "$remote_host"
 
     # Verify container running
     verify_container timeout --kill-after=5 "$REMOTE_TIMEOUT" docker -H "$remote_host"
@@ -884,6 +922,11 @@ deploy_ssh() {
       if [ "$COMPOSE_EXIT" -ne 0 ]; then
         fail "Container restart failed (exit ${COMPOSE_EXIT})"
       fi
+
+      local stack_ids
+      stack_ids=$(timeout --kill-after=5 "$REMOTE_TIMEOUT" ssh -o ConnectTimeout=8 -o BatchMode=yes "$DEPLOY_SSH_HOST" \
+        "cd '${DEPLOY_COMPOSE_DIR}' && sudo ${DEPLOY_DOCKER_BIN} ${remote_compose_cmd} ps -aq" 2>/dev/null || true)
+      pin_restart_policy "$stack_ids" ssh_docker
 
       verify_container ssh_docker
 

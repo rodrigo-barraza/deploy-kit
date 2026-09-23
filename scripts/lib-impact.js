@@ -355,7 +355,7 @@ const IGNORE_RE = new RegExp([
   '(^|/)README', '\\.md$', '\\.log$', '^\\.git(ignore|attributes)$',
   '^tests?/', '(^|/)__tests__/', '\\.test\\.', '\\.spec\\.',
   '^docs/', '^\\.github/', '^\\.githooks/', '^scripts/',
-  '\\.tsbuildinfo$', '\\.map$', '^\\.env', '^eslint\\.config\\.', '^vitest\\.config\\.',
+  '\\.tsbuildinfo$', '\\.map$', '^\\.env', '^\\.oxlintrc\\.json$', '^vitest\\.config\\.',
   '^\\.prettierrc', '^pnpm-lock\\.yaml$', '^package-lock\\.json$', '^pnpm-workspace\\.yaml$', '^tsconfig\\.json$',
 ].join('|'));
 

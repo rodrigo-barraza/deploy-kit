@@ -191,6 +191,28 @@ source "${SCRIPT_DIR}/../deploy-kit/lib.sh"
         self.assertEqual([e['args'] for e in self.events('probe', 'fixture-service')], [['wget', '-qO-', 'http://localhost/health']])
         self.assertTrue(self.manifest('deployed').exists())
 
+    def test_a_deployed_stack_comes_back_with_the_docker_engine_but_its_one_shot_jobs_do_not(self):
+        # Container Manager stops every container explicitly; `unless-stopped`
+        # then leaves them down for good. The deploy leaves `always` instead,
+        # on every container the compose file gave `unless-stopped` only.
+        job = {'STACK_JOB': 'fixture-service:fixture-service-migrate'}
+        self.assert_ok(self.run_deploy('--only=fixture-service', env=job))
+        updates = self.events('update')
+        self.assertEqual([(e['host'], e['names']) for e in updates], [('mock-target', ['fixture-service'])])
+        self.assertIn('--restart=always', updates[0]['args'])
+        state = json.loads((self.root / 'docker-state.json').read_text())['containers']['mock-target']
+        self.assertEqual(state['fixture-service']['restart'], 'always')
+        self.assertEqual(state['fixture-service-migrate']['restart'], 'no')
+
+        # The SSH road (the NAS) does the same across the SSH boundary.
+        self.clear_events()
+        self.registry['devices'][0]['deploy'] = {'method': 'ssh', 'composeRoot': '/mock remote'}
+        self.registry['devices'][0]['sshAlias'] = 'fake-nas'
+        self.save_registry()
+        (self.root / 'fixture-service/change.txt').write_text('redeploy\n'); self.commit('fixture-service')
+        self.assert_ok(self.run_deploy('--only=fixture-service', env=job))
+        self.assertEqual([e['names'] for e in self.events('update')], [['fixture-service']])
+
     def test_docker_down_fails_before_any_work_unless_docker_desktop_starts(self):
         missing = {'FAIL_DOCKER_INFO': '99', 'DOCKER_DESKTOP_EXE': str(self.root / 'absent.exe')}
         self.assert_failed(self.run_deploy(skip_pull=False, env=missing))

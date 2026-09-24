@@ -28,6 +28,15 @@ fi
 
 node "${EDGE_DIR}/generate-caddyfile.js" > /dev/null
 
+# The Caddyfile listens on the NAS's own ports (host networking). Hot-loaded
+# into a container still on the old bridge network, those listeners would sit
+# behind nothing and every site would go dark — so wait for edge:deploy.
+NETWORK_MODE=$(ssh nas "sudo /usr/local/bin/docker inspect edge-caddy --format '{{.HostConfig.NetworkMode}}'" 2>/dev/null || echo unknown)
+if [ "${NETWORK_MODE}" != "host" ]; then
+  echo "edge: live edge-caddy is on '${NETWORK_MODE}' networking — run 'npm run edge:deploy' to move it to host networking; Caddyfile NOT synced" >&2
+  exit 0
+fi
+
 # Only ship + reload when the config actually changed.
 if ssh nas "cat '${COMPOSE_DIR}/Caddyfile'" 2>/dev/null | diff -q - "${EDGE_DIR}/generated/Caddyfile" > /dev/null 2>&1; then
   echo "edge: Caddyfile unchanged"

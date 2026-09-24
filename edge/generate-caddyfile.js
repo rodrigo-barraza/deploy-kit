@@ -77,9 +77,23 @@ function render(sites, config) {
   lines.push(`# Source of truth: vault-service/projects.json + edge/edge.config.json`);
   lines.push(`# dnsProvider=${config.dnsProvider} tlsMode=${config.tlsMode} sites=${sites.length}`);
   lines.push("");
+  // Caddy runs with HOST networking (docker-compose.yml), listening on the
+  // NAS's own httpPort/httpsPort — the router forwards public 80/443 there.
+  // Behind a bridge network the Synology's port publishing handed Caddy every
+  // visitor as the Docker gateway (172.16.50.1), so no service ever saw a
+  // real client IP. On non-standard ports Caddy's automatic HTTP→HTTPS
+  // redirect would name the port (https://host:18443/…), so it is replaced by
+  // an explicit one to the public https://host.
   lines.push("{");
   lines.push("\tadmin localhost:2019");
+  lines.push(`\thttp_port ${config.httpPort}`);
+  lines.push(`\thttps_port ${config.httpsPort}`);
+  lines.push("\tauto_https disable_redirects");
   if (config.tlsMode === "internal") lines.push("\tlocal_certs");
+  lines.push("}");
+  lines.push("");
+  lines.push("http:// {");
+  lines.push("\tredir https://{host}{uri} permanent");
   lines.push("}");
   lines.push("");
 

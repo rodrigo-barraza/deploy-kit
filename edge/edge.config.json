@@ -12,7 +12,7 @@
   "$tlsMode": "'internal' = Caddy's self-signed CA (pre-cutover testing, preflight uses --insecure). 'auto' = real ACME certs; uses the DNS-01 challenge when dnsProvider != 'none' (works BEFORE the router flip — no inbound traffic needed).",
   "httpPort": 18080,
   "httpsPort": 18443,
-  "$ports": "Host ports the Caddy container publishes on the NAS. At cutover the router forwards public 80→18080 and 443→18443. DSM keeps its own 80/443 untouched (instant rollback).",
+  "$ports": "The NAS ports Caddy listens on (host networking, so it sees real client IPs). The router forwards public 80→httpPort and 443→httpsPort. DSM keeps its own 80/443 untouched (instant rollback).",
   "deployDevice": "synology",
   "composeDir": "/volume1/docker/edge",
   "publicIp": "auto",

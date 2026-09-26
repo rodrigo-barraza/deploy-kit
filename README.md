@@ -247,6 +247,8 @@ Each project can specify a `deployTarget` device ID (defaults to `"synology"`):
 }
 ```
 
+A project with no `deployTarget` whose `device` names a device with no `deploy` method (e.g. `"device": "workstation"` for a loopback-only tool run by hand) is not deploy-kit's: it is never pulled, built or shipped. `--skip` may name it; `--only` naming it fails with where it runs.
+
 Each device in the `devices` array declares its deploy method:
 
 ```json

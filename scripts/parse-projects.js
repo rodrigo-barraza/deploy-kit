@@ -71,6 +71,14 @@ try {
   // Emit tier + service metadata
   const tiers = {};
   for (const project of configData.projects) {
+    // A project the registry places on a device deploy-kit cannot deploy to
+    // (`device`, with no `deployTarget`) runs there by hand, e.g. a loopback-only
+    // tool on the workstation. It is not deploy-kit's to pull, build or ship.
+    const runsOn = project.deployTarget === undefined && devices[project.device];
+    if (runsOn && !runsOn.deploy?.method) {
+      emit('SVC_RUNS_ON', project.id, runsOn.id);
+      continue;
+    }
     let tier = project.deployTier;
     if (typeof tier !== 'number') {
       if (project.id.endsWith('-service') || project.id.endsWith('-client')) {

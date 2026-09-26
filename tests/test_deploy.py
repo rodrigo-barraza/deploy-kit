@@ -360,6 +360,22 @@ source "${SCRIPT_DIR}/../deploy-kit/lib.sh"
         self.assertEqual(len(self.events('pull', 'utilities-library')), 1)
         self.assertTrue((self.root / 'utilities-library/remote-update.txt').exists())
 
+    def test_a_project_placed_on_a_device_without_a_deploy_method_is_never_pulled(self):
+        # Tower: registry `device: workstation`, run by hand, no git remote to pull.
+        self.enable_remotes()
+        self.registry['devices'].append({'id': 'desk', 'hostname': 'mock-desk'})
+        self.add_service('desk-service')
+        desk = self.registry['projects'][-1]
+        del desk['deployTarget'], desk['deployTier']
+        desk['device'] = 'desk'
+        self.save_registry()
+        self.assert_ok(self.run_deploy('--changed-all', skip_pull=False))
+        self.assertTrue(self.events('pull', 'fixture-service'))
+        self.assertFalse(self.events(service='desk-service'))
+        self.assert_ok(self.run_deploy('--skip=desk-service', '--dry-run'))
+        self.assert_failed(self.run_deploy('--only=desk-service'))
+        self.assertIn('desk-service runs on desk, which deploy-kit does not deploy to', self.output)
+
     def test_failed_pull_aborts_before_build(self):
         self.enable_remotes()
         self.assert_failed(self.run_deploy(skip_pull=False, env={'FAIL_PULL': 'fixture-service'}))

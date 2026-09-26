@@ -103,13 +103,13 @@ STATE_HELPER="${SCRIPT_DIR}/scripts/deploy-state.js"
 STATE_MODE=deployed
 $BUILD_ONLY && STATE_MODE=built
 DEPLOY_STATE_DIR="${DEPLOY_STATE_ROOT}/${STATE_MODE}"
-declare -A TIER_SERVICES=() SVC_HEALTH_URL=() SVC_DEPLOY_TARGET=() SVC_LIB_DEPS=() SVC_DEPS=() SVC_DIR=()
+declare -A TIER_SERVICES=() SVC_HEALTH_URL=() SVC_DEPLOY_TARGET=() SVC_LIB_DEPS=() SVC_DEPS=() SVC_DIR=() SVC_RUNS_ON=()
 declare -A DEVICE_METHOD=() DEVICE_HOSTNAME=() DEVICE_ARCH=() DEVICE_SSH_ALIAS=() DEVICE_DOCKER_BIN=()
 declare -A DEVICE_DOCKER_API=() DEVICE_COMPOSE_ROOT=() DEVICE_SMB_ROOT=()
 ALL_SERVICES=() LIBRARY_IDS=() DOCKER_DEVICES=()
 load_projects() {
   local data tier id
-  TIER_SERVICES=(); SVC_HEALTH_URL=(); SVC_DEPLOY_TARGET=(); SVC_LIB_DEPS=(); SVC_DEPS=(); SVC_DIR=()
+  TIER_SERVICES=(); SVC_HEALTH_URL=(); SVC_DEPLOY_TARGET=(); SVC_LIB_DEPS=(); SVC_DEPS=(); SVC_DIR=(); SVC_RUNS_ON=()
   DEVICE_METHOD=(); DEVICE_HOSTNAME=(); DEVICE_ARCH=(); DEVICE_SSH_ALIAS=(); DEVICE_DOCKER_BIN=()
   DEVICE_DOCKER_API=(); DEVICE_COMPOSE_ROOT=(); DEVICE_SMB_ROOT=(); ALL_SERVICES=()
   data=$(node "${SCRIPT_DIR}/scripts/parse-projects.js" "$PROJECTS_JSON" "$ROOT_DIR") || die 'Invalid project registry'
@@ -131,8 +131,13 @@ validate_list() {
   for item in "${items[@]}"; do
     if [ "$name" = group ]; then
       case "$item" in client|service|bot|vault) ;; *) die "Unknown group: $item" ;; esac
-    else
-      [ -n "${SVC_DEPLOY_TARGET[$item]:-}" ] || die "Unknown service in --${name}: $item"
+    elif [ -z "${SVC_DEPLOY_TARGET[$item]:-}" ]; then
+      # Skipping a project deploy-kit never deploys is already true; asking for it is not.
+      if [ -n "${SVC_RUNS_ON[$item]:-}" ]; then
+        [ "$name" = skip ] || die "$item runs on ${SVC_RUNS_ON[$item]}, which deploy-kit does not deploy to"
+      else
+        die "Unknown service in --${name}: $item"
+      fi
     fi
   done
 }

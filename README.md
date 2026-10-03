@@ -207,7 +207,7 @@ recorded here so a fresh NAS or a replaced router does not silently lose it.
 
 | Service | Step | Proof |
 |---|---|---|
-| `games-service` | Forward **UDP 5611** from the router to the NAS — the proximity-voice relay and the presence datagrams that ride it (`docker-compose.yml` publishes `5611:5611/udp`; Caddy carries none of it). Missing, every player on a shared ranch sees 📵. | In `games-service`: `node tests/live/relay-echo.mjs https://api.games.rod.dev` — its README → Deploying |
+| ~~`games-service`~~ → `paper-tiles-service` — **retired 2026-10-02** | **Remove** the router's **UDP 5611** forward to the NAS. Nothing listens there any more: the service's container is gone, `api.games.rod.dev` is pruned, and players host their own worlds (`pt-server`, in `paper-tiles-client`). | The router lists no forward for 5611 |
 
 ## Config Variables
 

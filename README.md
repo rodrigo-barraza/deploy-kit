@@ -207,7 +207,7 @@ recorded here so a fresh NAS or a replaced router does not silently lose it.
 
 | Service | Step | Proof |
 |---|---|---|
-| ~~`games-service`~~ → `paper-tiles-service` — **retired 2026-10-02** | **Remove** the router's **UDP 5611** forward to the NAS. Nothing listens there any more: the service's container is gone, `api.games.rod.dev` is pruned, and players host their own worlds (`pt-server`, in `paper-tiles-client`). | The router lists no forward for 5611 |
+| ~~`games-service`~~ → `paper-tiles-service` — **retired 2026-10-02** | **Remove** the router's **UDP 5611** forward to the NAS. Nothing listens there any more: the service's container is gone, `api.games.rod.dev` is pruned, and players host their own worlds. | The router lists no forward for 5611 |
 
 ## Config Variables
 
@@ -230,8 +230,8 @@ Services can deploy to different devices. Configuration lives in `vault-service/
 A project is normally the workspace directory named after its registry `id`. One that lives inside a larger repository names its directory with `dir` (relative to the workspace root) and, with `sources`, the paths outside that directory its image is built from (relative to that repository's root):
 
 ```json
-{ "id": "paper-tiles-service", "dir": "paper-tiles-client/rust/crates/pt-service",
-  "sources": ["rust/Cargo.lock", "rust/Cargo.toml", "rust/crates/pt-server"] }
+{ "id": "nested-service", "dir": "game/crates/svc",
+  "sources": ["crates/shared"] }
 ```
 
 Its `deploy.sh` is read from `dir`. It is never pulled (the host repository moves by its own rules), and change detection fingerprints only `dir` and `sources`: the recorded sha is the last commit that touched them, so the rest of that repository moving does not redeploy it.
